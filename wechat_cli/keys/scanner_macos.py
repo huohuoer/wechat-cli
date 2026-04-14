@@ -212,11 +212,11 @@ def extract_keys(db_dir, output_path, pid=None):
     if os.path.abspath(c_output) != os.path.abspath(output_path):
         os.remove(c_output)
 
-    # 构建 salt -> key 映射
+    # 构建 rel_path -> key 映射（C 二进制仅写入 enc_key，不带 salt）
     key_map = {}
     for rel, info in keys_data.items():
-        if isinstance(info, dict) and "enc_key" in info and "salt" in info:
-            key_map[info["salt"]] = info["enc_key"]
+        if isinstance(info, dict) and "enc_key" in info:
+            key_map[rel] = info["enc_key"]
 
     print(f"\n[+] 提取到 {len(key_map)} 个密钥，保存到: {output_path}")
     return key_map
