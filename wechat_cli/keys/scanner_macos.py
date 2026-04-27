@@ -127,7 +127,7 @@ def extract_keys(db_dir, output_path, pid=None):
         pid: 未使用（C 二进制自动检测进程）
 
     Returns:
-        dict: salt_hex -> enc_key_hex 映射
+        dict: rel_path -> enc_key_hex 映射（与 C 二进制输出 schema 一致）
     """
     import json
 
@@ -212,11 +212,14 @@ def extract_keys(db_dir, output_path, pid=None):
     if os.path.abspath(c_output) != os.path.abspath(output_path):
         os.remove(c_output)
 
-    # 构建 salt -> key 映射
-    key_map = {}
-    for rel, info in keys_data.items():
-        if isinstance(info, dict) and "enc_key" in info and "salt" in info:
-            key_map[info["salt"]] = info["enc_key"]
+    # 构建 rel_path -> enc_key 映射。C 二进制输出 schema 是
+    # {"db.path": {"enc_key": "..."}}（不含 salt），下游 get_key_info
+    # 也按 rel_path 查询，所以这里保持同样的索引方式。
+    key_map = {
+        rel: info["enc_key"]
+        for rel, info in keys_data.items()
+        if isinstance(info, dict) and "enc_key" in info
+    }
 
     print(f"\n[+] 提取到 {len(key_map)} 个密钥，保存到: {output_path}")
     return key_map
