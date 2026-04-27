@@ -21,34 +21,39 @@ _FAV_TYPE_FILTERS = {
 
 
 def _parse_fav_content(content, fav_type):
-    """从 XML content 提取摘要信息。"""
+    """从 XML content 提取摘要信息和 URL。"""
     if not content:
-        return ''
+        return '', ''
     try:
         root = ET.fromstring(content)
     except ET.ParseError:
-        return ''
+        return '', ''
     item = root if root.tag == 'favitem' else root.find('.//favitem')
     if item is None:
-        return ''
+        return '', ''
 
     if fav_type == 1:
-        return (item.findtext('desc') or '').strip()
+        return (item.findtext('desc') or '').strip(), ''
     if fav_type == 2:
-        return '[图片收藏]'
+        return '[图片收藏]', ''
     if fav_type == 5:
         title = (item.findtext('.//pagetitle') or '').strip()
         desc = (item.findtext('.//pagedesc') or '').strip()
-        return f"{title} - {desc}" if desc else title
+        url = (item.findtext('.//source/link')
+               or item.findtext('.//dataitem/stream_weburl')
+               or '').strip()
+        parts = [p for p in [title, desc] if p]
+        summary = ' - '.join(parts) if parts else '[文章]'
+        return summary, url
     if fav_type == 19:
-        return (item.findtext('desc') or '').strip()
+        return (item.findtext('desc') or '').strip(), ''
     if fav_type == 20:
         nickname = (item.findtext('.//nickname') or '').strip()
         desc = (item.findtext('.//desc') or '').strip()
         parts = [p for p in [nickname, desc] if p]
-        return ' '.join(parts) if parts else '[视频号]'
+        return (' '.join(parts) if parts else '[视频号]'), ''
     desc = (item.findtext('desc') or '').strip()
-    return desc if desc else '[收藏]'
+    return (desc if desc else '[收藏]'), ''
 
 
 @click.command("favorites")
@@ -111,16 +116,19 @@ def favorites(ctx, limit, fav_type, query, fmt):
         from_display = names.get(fromusr, fromusr) if fromusr else ''
         chat_display = names.get(realchat, realchat) if realchat else ''
 
-        summary = _parse_fav_content(content, typ)
+        summary, url = _parse_fav_content(content, typ)
 
-        results.append({
+        entry = {
             'id': local_id,
             'type': _FAV_TYPE_MAP.get(typ, f'type={typ}'),
             'time': datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M'),
             'summary': summary,
             'from': from_display,
             'source_chat': chat_display,
-        })
+        }
+        if url:
+            entry['url'] = url
+        results.append(entry)
 
     if fmt == 'json':
         output({
@@ -134,6 +142,8 @@ def favorites(ctx, limit, fav_type, query, fmt):
         lines = []
         for r in results:
             entry = f"[{r['time']}] [{r['type']}] {r['summary']}"
+            if r.get('url'):
+                entry += f"\n  链接: {r['url']}"
             if r['from']:
                 entry += f"\n  来自: {r['from']}"
             if r['source_chat']:
