@@ -20,8 +20,9 @@ from ..output.formatter import output
 @click.option("--start-time", default="", help="起始时间 YYYY-MM-DD [HH:MM[:SS]]")
 @click.option("--end-time", default="", help="结束时间 YYYY-MM-DD [HH:MM[:SS]]")
 @click.option("--limit", default=500, help="导出消息数量")
+@click.option("--media", is_flag=True, help="解析媒体文件路径（图片/文件/视频/语音）")
 @click.pass_context
-def export(ctx, chat_name, fmt, output_path, start_time, end_time, limit):
+def export(ctx, chat_name, fmt, output_path, start_time, end_time, limit, media):
     """导出聊天记录为 markdown 或纯文本
 
     \b
@@ -29,6 +30,7 @@ def export(ctx, chat_name, fmt, output_path, start_time, end_time, limit):
       wechat-cli export "张三" --format markdown
       wechat-cli export "AI交流群" --format txt --output chat.txt
       wechat-cli export "张三" --start-time "2026-04-01" --limit 1000
+      wechat-cli export "张三" --media --output chat.md          # 解析图片/文件本地路径
     """
     app = ctx.obj
 
@@ -51,6 +53,7 @@ def export(ctx, chat_name, fmt, output_path, start_time, end_time, limit):
     lines, failures = collect_chat_history(
         chat_ctx, names, app.display_name_fn,
         start_ts=start_ts, end_ts=end_ts, limit=limit, offset=0,
+        resolve_media=media, db_dir=app.db_dir,
     )
 
     if not lines:
