@@ -528,6 +528,45 @@ def _build_history_line(row, ctx, names, id_to_username, display_name_fn, resolv
     return create_time, f'[{time_str}] {text}'
 
 
+def _build_history_record(row, ctx, names, id_to_username, display_name_fn, resolve_media=False, db_dir=None):
+    """构造单条消息的结构化记录（用于 jsonl 输出）。
+
+    与 _build_history_line 平行 — 同样的字段解压与格式化，但返回 dict 而非格式化字符串。
+    """
+    local_id, local_type, create_time, real_sender_id, content, ct = row
+    content = decompress_content(content, ct)
+    if content is None:
+        content = '(无法解压)'
+    sender_from_content, text = _format_message_text(
+        local_id, local_type, content, ctx['is_group'], ctx['username'], ctx['display_name'], names, display_name_fn,
+        db_dir=db_dir, create_time_ts=create_time, resolve_media=resolve_media,
+    )
+    sender_username = id_to_username.get(real_sender_id, '') or ''
+    sender_display = _resolve_sender_label(
+        real_sender_id, sender_from_content, ctx['is_group'], ctx['username'], ctx['display_name'],
+        names, id_to_username, display_name_fn,
+    )
+    # is_self: 在 1:1 聊天中 sender_username 不等于对方 username 即为自己；
+    # 在群聊中，sender_username 与 sender_from_content 都为空时通常为自己发的消息。
+    if ctx['is_group']:
+        is_self = not sender_username and not sender_from_content
+    else:
+        is_self = bool(sender_username) and sender_username != ctx['username']
+    return create_time, {
+        'local_id': local_id,
+        'create_time': create_time,
+        'msg_type': format_msg_type(local_type),
+        'local_type': local_type,
+        'is_self': is_self,
+        'sender_id': sender_username,
+        'sender_display': sender_display,
+        'is_group': ctx['is_group'],
+        'chat_username': ctx['username'],
+        'chat_display': ctx['display_name'],
+        'text': text,
+    }
+
+
 def _build_search_entry(row, ctx, names, id_to_username, display_name_fn, resolve_media=False, db_dir=None):
     local_id, local_type, create_time, real_sender_id, content, ct = row
     content = decompress_content(content, ct)
@@ -552,11 +591,17 @@ def _build_search_entry(row, ctx, names, id_to_username, display_name_fn, resolv
 
 # ---- 聊天记录查询 ----
 
-def collect_chat_history(ctx, names, display_name_fn, start_ts=None, end_ts=None, limit=20, offset=0, msg_type_filter=None, resolve_media=False, db_dir=None):
+def collect_chat_history(ctx, names, display_name_fn, start_ts=None, end_ts=None, limit=20, offset=0, msg_type_filter=None, resolve_media=False, db_dir=None, as_records=False):
+    """收集聊天记录。
+
+    as_records=False（默认）：返回格式化字符串列表（保持与现有调用方兼容）。
+    as_records=True：返回结构化 dict 列表（供 jsonl 输出等场景使用）。
+    """
     collected = []
     failures = []
     candidate_limit = _candidate_page_size(limit, offset)
     batch_size = min(candidate_limit, _HISTORY_QUERY_BATCH_SIZE)
+    builder = _build_history_record if as_records else _build_history_line
 
     for table_ctx in _iter_table_contexts(ctx):
         try:
@@ -571,7 +616,7 @@ def collect_chat_history(ctx, names, display_name_fn, start_ts=None, end_ts=None
                     fetch_offset += len(rows)
                     for row in rows:
                         try:
-                            collected.append(_build_history_line(row, table_ctx, names, id_to_username, display_name_fn, resolve_media=resolve_media, db_dir=db_dir))
+                            collected.append(builder(row, table_ctx, names, id_to_username, display_name_fn, resolve_media=resolve_media, db_dir=db_dir))
                         except Exception as e:
                             failures.append(f"local_id={row[0]}: {e}")
                         if len(collected) - before >= candidate_limit:
@@ -582,7 +627,7 @@ def collect_chat_history(ctx, names, display_name_fn, start_ts=None, end_ts=None
             failures.append(f"{table_ctx['db_path']}: {e}")
 
     paged = _page_ranked_entries(collected, limit, offset)
-    return [line for _, line in paged], failures
+    return [item for _, item in paged], failures
 
 
 # ---- 搜索查询 ----

@@ -17,9 +17,19 @@ def output_text(text, file=None):
         file.write('\n')
 
 
+def output_jsonl(records, file=None):
+    """逐行输出 JSON 对象（每行一个），便于流式消费。"""
+    file = file or sys.stdout
+    for rec in records:
+        json.dump(rec, file, ensure_ascii=False)
+        file.write('\n')
+
+
 def output(data, fmt='json', file=None):
     if fmt == 'json':
         output_json(data, file)
+    elif fmt == 'jsonl':
+        output_jsonl(data, file)
     else:
         if isinstance(data, str):
             output_text(data, file)

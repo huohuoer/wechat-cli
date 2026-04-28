@@ -20,7 +20,7 @@ from ..output.formatter import output
 @click.option("--offset", default=0, help="分页偏移量")
 @click.option("--start-time", default="", help="起始时间 YYYY-MM-DD [HH:MM[:SS]]")
 @click.option("--end-time", default="", help="结束时间 YYYY-MM-DD [HH:MM[:SS]]")
-@click.option("--format", "fmt", default="json", type=click.Choice(["json", "text"]), help="输出格式")
+@click.option("--format", "fmt", default="json", type=click.Choice(["json", "jsonl", "text"]), help="输出格式（jsonl: 每行一个结构化 JSON 对象，便于流式消费）")
 @click.option("--type", "msg_type", default=None, type=click.Choice(MSG_TYPE_NAMES), help="消息类型过滤")
 @click.option("--media", is_flag=True, help="解析媒体文件路径（图片/文件/视频/语音）")
 @click.pass_context
@@ -57,6 +57,7 @@ def history(ctx, chat_name, limit, offset, start_time, end_time, fmt, msg_type, 
         chat_ctx, names, app.display_name_fn,
         start_ts=start_ts, end_ts=end_ts, limit=limit, offset=offset,
         msg_type_filter=type_filter, resolve_media=media, db_dir=app.db_dir,
+        as_records=(fmt == 'jsonl'),
     )
 
     if fmt == 'json':
@@ -73,6 +74,10 @@ def history(ctx, chat_name, limit, offset, start_time, end_time, fmt, msg_type, 
             'messages': lines,
             'failures': failures if failures else None,
         }, 'json')
+    elif fmt == 'jsonl':
+        output(lines, 'jsonl')
+        for fail in failures:
+            click.echo(f"failure: {fail}", err=True)
     else:
         header = f"{chat_ctx['display_name']} 的消息记录（返回 {len(lines)} 条，offset={offset}, limit={limit}）"
         if chat_ctx['is_group']:
