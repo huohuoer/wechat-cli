@@ -13,7 +13,11 @@
     "install.js"
   ],
   "optionalDependencies": {
-    "@canghe_ai/wechat-cli-darwin-arm64": "0.2.4"
+    "@canghe_ai/wechat-cli-darwin-arm64": "0.2.4",
+    "@canghe_ai/wechat-cli-darwin-x64": "0.2.4",
+    "@canghe_ai/wechat-cli-linux-x64": "0.2.4",
+    "@canghe_ai/wechat-cli-linux-arm64": "0.2.4",
+    "@canghe_ai/wechat-cli-win32-x64": "0.2.4"
   },
   "engines": {
     "node": ">=14"
