@@ -34,6 +34,19 @@ MSG_TYPE_FILTERS = {
 MSG_TYPE_NAMES = list(MSG_TYPE_FILTERS.keys())
 
 
+def msg_type_matches(raw_type, msg_type_name):
+    """Return whether a raw WeChat message type matches a named filter."""
+    msg_type_filter = MSG_TYPE_FILTERS.get(msg_type_name)
+    if msg_type_filter is None:
+        return True
+    base_type, sub_type = _split_msg_type(raw_type)
+    if base_type != msg_type_filter[0]:
+        return False
+    if len(msg_type_filter) > 1:
+        return sub_type == msg_type_filter[1]
+    return True
+
+
 # ---- 消息 DB 发现 ----
 
 def find_msg_db_keys(all_keys):
@@ -501,10 +514,10 @@ def _candidate_page_size(limit, offset):
     return limit + offset
 
 
-def _page_ranked_entries(entries, limit, offset):
-    ordered = sorted(entries, key=lambda item: item[0], reverse=True)
+def _page_ranked_entries(entries, limit, offset, reverse=True):
+    ordered = sorted(entries, key=lambda item: item[0], reverse=reverse)
     paged = ordered[offset:offset + limit]
-    paged.sort(key=lambda item: item[0])
+    paged.sort(key=lambda item: item[0], reverse=reverse)
     return paged
 
 
@@ -552,7 +565,7 @@ def _build_search_entry(row, ctx, names, id_to_username, display_name_fn, resolv
 
 # ---- 聊天记录查询 ----
 
-def collect_chat_history(ctx, names, display_name_fn, start_ts=None, end_ts=None, limit=20, offset=0, msg_type_filter=None, resolve_media=False, db_dir=None):
+def collect_chat_history(ctx, names, display_name_fn, start_ts=None, end_ts=None, limit=20, offset=0, msg_type_filter=None, resolve_media=False, db_dir=None, sort_reverse=True):
     collected = []
     failures = []
     candidate_limit = _candidate_page_size(limit, offset)
@@ -581,8 +594,9 @@ def collect_chat_history(ctx, names, display_name_fn, start_ts=None, end_ts=None
         except Exception as e:
             failures.append(f"{table_ctx['db_path']}: {e}")
 
-    paged = _page_ranked_entries(collected, limit, offset)
-    return [line for _, line in paged], failures
+    total = len(collected)
+    paged = _page_ranked_entries(collected, limit, offset, reverse=sort_reverse)
+    return [line for _, line in paged], total, failures
 
 
 # ---- 搜索查询 ----
@@ -634,10 +648,11 @@ def collect_chat_search(ctx, names, keyword, display_name_fn, start_ts=None, end
                 failures.extend(db_failures)
         except Exception as e:
             failures.extend(f"{tc['display_name']}: {e}" for tc in db_contexts)
-    return collected, failures
+    total = len(collected)
+    return collected, total, failures
 
 
-def search_all_messages(msg_db_keys, cache, names, keyword, display_name_fn, start_ts=None, end_ts=None, candidate_limit=20, msg_type_filter=None):
+def search_all_messages(msg_db_keys, cache, names, keyword, display_name_fn, start_ts=None, end_ts=None, candidate_limit=20, msg_type_filter=None, context_filter=None):
     collected = []
     failures = []
     for rel_key in msg_db_keys:
@@ -647,6 +662,10 @@ def search_all_messages(msg_db_keys, cache, names, keyword, display_name_fn, sta
         try:
             with closing(sqlite3.connect(path)) as conn:
                 contexts = _load_search_contexts_from_db(conn, path, names)
+                if context_filter is not None:
+                    contexts = [ctx for ctx in contexts if context_filter(ctx)]
+                if not contexts:
+                    continue
                 db_entries, db_failures = _collect_search_entries(
                     conn, contexts, names, keyword, display_name_fn,
                     start_ts=start_ts, end_ts=end_ts, candidate_limit=candidate_limit,
@@ -656,7 +675,8 @@ def search_all_messages(msg_db_keys, cache, names, keyword, display_name_fn, sta
                 failures.extend(db_failures)
         except Exception as e:
             failures.append(f"{rel_key}: {e}")
-    return collected, failures
+    total = len(collected)
+    return collected, total, failures
 
 
 def _load_search_contexts_from_db(conn, db_path, names):

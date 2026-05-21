@@ -3,6 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 const PLATFORM_PACKAGES = {
   'darwin-arm64': '@canghe_ai/wechat-cli-darwin-arm64',
@@ -28,6 +29,10 @@ try {
   if (process.platform !== 'win32') {
     fs.chmodSync(binaryPath, 0o755);
     console.log(`wechat-cli: set executable permission for ${platformKey}`);
+  }
+  if (process.platform === 'darwin') {
+    const binDir = path.dirname(binaryPath);
+    spawnSync('xattr', ['-cr', binDir], { stdio: 'ignore' });
   }
 } catch {
   // Platform package was not installed (npm --no-optional or unsupported)

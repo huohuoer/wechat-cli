@@ -23,7 +23,7 @@ def cli(ctx, config_path):
       wechat-cli sessions                            # 最近会话列表
       wechat-cli sessions --limit 10                 # 最近 10 个会话
       wechat-cli history "张三" --limit 20          # 查看张三的最近 20 条消息
-      wechat-cli history "AI交流群" --start-time "2026-04-01"  # 指定时间范围
+      wechat-cli history "AI交流群" --from "2026-04-01"  # 指定时间范围
       wechat-cli search "Claude" --chat "AI交流群"   # 在指定群里搜索关键词
       wechat-cli search "你好" --limit 50           # 全局搜索
       wechat-cli contacts --query "李"              # 搜索联系人

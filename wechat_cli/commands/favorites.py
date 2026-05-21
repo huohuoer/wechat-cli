@@ -9,7 +9,8 @@ from datetime import datetime
 import click
 
 from ..core.contacts import get_contact_names
-from ..output.formatter import output
+from ..output.formatter import Column, QUERY_FORMATS, render_result
+from .schema_option import schema_option
 
 _FAV_TYPE_MAP = {
     1: '文本', 2: '图片', 5: '文章', 19: '名片', 20: '视频号',
@@ -52,23 +53,26 @@ def _parse_fav_content(content, fav_type):
 
 
 @click.command("favorites")
-@click.option("--limit", default=20, help="返回数量")
-@click.option("--type", "fav_type", default=None,
+@schema_option("favorites")
+@click.option("--limit", metavar="", default=20, help="返回数量 (默认 20)")
+@click.option("--msg-type", "fav_type", default=None,
               type=click.Choice(list(_FAV_TYPE_FILTERS.keys())),
-              help="按类型过滤: text/image/article/card/video")
-@click.option("--query", default=None, help="关键词搜索")
-@click.option("--format", "fmt", default="json", type=click.Choice(["json", "text"]), help="输出格式")
+              metavar="", help="收藏类型: text, image, article, card, video")
+@click.option("--query", metavar="", default=None, help="搜索关键词")
+@click.option("--format", "fmt", default="json", type=click.Choice(QUERY_FORMATS), metavar="", help="输出格式: json, ndjson, table, text (默认 json)")
+@click.option("--fields", metavar="", default=None, help="字段选择器 (逗号分隔)")
 @click.pass_context
-def favorites(ctx, limit, fav_type, query, fmt):
+def favorites(ctx, limit, fav_type, query, fmt, fields):
     """查看微信收藏
 
     \b
     示例:
       wechat-cli favorites                        # 最近收藏
-      wechat-cli favorites --type article         # 只看文章
+      wechat-cli favorites --msg-type article     # 只看文章
       wechat-cli favorites --query "计算机网络"    # 搜索收藏
-      wechat-cli favorites --limit 5 --format text
+      wechat-cli favorites --limit 5 --format table
     """
+
     app = ctx.obj
 
     # 查找 favorite.db
@@ -98,6 +102,10 @@ def favorites(ctx, limit, fav_type, query, fmt):
 
         where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ''
 
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM fav_db_item {where_sql}", params
+        ).fetchone()[0]
+
         rows = conn.execute(f"""
             SELECT local_id, type, update_time, content, fromusr, realchatname
             FROM fav_db_item
@@ -122,21 +130,39 @@ def favorites(ctx, limit, fav_type, query, fmt):
             'source_chat': chat_display,
         })
 
-    if fmt == 'json':
-        output({
-            'count': len(results),
-            'favorites': results,
-        }, 'json')
-    else:
-        if not results:
-            output("没有找到收藏", 'text')
-            return
-        lines = []
-        for r in results:
-            entry = f"[{r['time']}] [{r['type']}] {r['summary']}"
-            if r['from']:
-                entry += f"\n  来自: {r['from']}"
-            if r['source_chat']:
-                entry += f"  聊天: {r['source_chat']}"
-            lines.append(entry)
-        output(f"收藏列表（{len(results)} 条）:\n\n" + "\n\n".join(lines), 'text')
+    data = {
+        'total': total,
+        'has_more': total > limit,
+        'limit': limit,
+        'count': len(results),
+        'favorites': results,
+    }
+    render_result(
+        data, fmt, records_key='favorites', fields=fields,
+        columns=[
+            Column("time", "TIME", width=16),
+            Column("type", "TYPE", width=10),
+            Column("summary", "SUMMARY", min_width=20, max_width=64),
+            Column("from", "FROM", min_width=8, max_width=18),
+            Column("source_chat", "SOURCE", min_width=8, max_width=18),
+        ],
+        text_fn=_format_favorites_text,
+    )
+
+
+def _format_favorites_text(data):
+    results = data['favorites']
+    if not results:
+        return "没有找到收藏"
+    header = f"收藏列表（{len(results)} 条，共 {data['total']} 条）"
+    if data['has_more']:
+        header += "，还有更多"
+    lines = []
+    for r in results:
+        entry = f"[{r['time']}] [{r['type']}] {r['summary']}"
+        if r['from']:
+            entry += f"\n  来自: {r['from']}"
+        if r['source_chat']:
+            entry += f"  聊天: {r['source_chat']}"
+        lines.append(entry)
+    return header + ":\n\n" + "\n\n".join(lines)

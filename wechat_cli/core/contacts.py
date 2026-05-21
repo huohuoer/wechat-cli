@@ -9,6 +9,30 @@ _contact_names = None  # {username: display_name}
 _contact_full = None   # [{username, nick_name, remark}]
 _self_username = None
 
+CHAT_TYPE_GROUP = 'group'
+CHAT_TYPE_SUBSCRIPTION = 'subscription'
+CHAT_TYPE_CONTACT = 'contact'
+CHAT_TYPE_OPENIM = 'openim'
+CHAT_TYPE_KEFU = 'kefu'
+
+
+def classify_chat_type(username):
+    """Classify a chat by username prefix.
+
+    Returns one of: 'group', 'subscription', 'openim', 'kefu', 'contact'
+    """
+    if not username:
+        return CHAT_TYPE_CONTACT
+    if username.startswith('gh_'):
+        return CHAT_TYPE_SUBSCRIPTION
+    if '@chatroom' in username:
+        return CHAT_TYPE_GROUP
+    if '@kefu.openim' in username:
+        return CHAT_TYPE_KEFU
+    if '@openim' in username:
+        return CHAT_TYPE_OPENIM
+    return CHAT_TYPE_CONTACT
+
 
 def _load_contacts_from(db_path):
     names = {}
@@ -177,6 +201,7 @@ def get_contact_detail(username, cache, decrypted_dir):
         if not row:
             return None
         uname, nick, remark, alias, desc, small_url, big_url, verify, ltype = row
+        chat_type = classify_chat_type(uname)
         return {
             'username': uname,
             'nick_name': nick or '',
@@ -186,8 +211,9 @@ def get_contact_detail(username, cache, decrypted_dir):
             'avatar': small_url or big_url or '',
             'verify_flag': verify or 0,
             'local_type': ltype,
-            'is_group': '@chatroom' in uname,
-            'is_subscription': uname.startswith('gh_'),
+            'chat_type': chat_type,
+            'is_group': chat_type == CHAT_TYPE_GROUP,
+            'is_subscription': chat_type == CHAT_TYPE_SUBSCRIPTION,
         }
     finally:
         conn.close()
