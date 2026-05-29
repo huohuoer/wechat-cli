@@ -1,6 +1,7 @@
 """消息查询 — 分表查找、分页、格式化"""
 
 import hashlib
+import html
 import os
 import re
 import sqlite3
@@ -14,9 +15,13 @@ from .key_utils import key_path_variants
 
 _zstd_dctx = zstd.ZstdDecompressor()
 _XML_UNSAFE_RE = re.compile(r'<!DOCTYPE|<!ENTITY', re.IGNORECASE)
+_DATAITEM_OPEN_RE = re.compile(r'<dataitem(?=[\s>])')
 _XML_PARSE_MAX_LEN = 20000
 _QUERY_LIMIT_MAX = 500
 _HISTORY_QUERY_BATCH_SIZE = 500
+_FORWARDED_RECORD_QUERY_BATCH_SIZE = 500
+_FORWARDED_RECORD_SCAN_LIMIT_DEFAULT = 5000
+_FORWARDED_RECORD_MAX_DEPTH = 4
 
 # 消息类型过滤映射: 名称 -> (base_type,) 或 (base_type, sub_type)
 MSG_TYPE_FILTERS = {
@@ -32,6 +37,15 @@ MSG_TYPE_FILTERS = {
     'system': (10000,),
 }
 MSG_TYPE_NAMES = list(MSG_TYPE_FILTERS.keys())
+
+FORWARDED_RECORD_TYPE_LABELS = {
+    '1': '文本',
+    '2': '图片',
+    '5': '链接',
+    '19': '合并聊天记录',
+    '17': '位置/分享',
+    '37': '引用/小程序',
+}
 
 
 # ---- 消息 DB 发现 ----
@@ -133,6 +147,83 @@ def _collapse_text(text):
     return re.sub(r'\s+', ' ', text).strip()
 
 
+def _clean_record_text(text):
+    if not text:
+        return ''
+    text = text.replace('<![CDATA[', '').replace(']]>', '')
+    text = html.unescape(text)
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    lines = [re.sub(r'[ \t]+', ' ', line).strip() for line in text.split('\n')]
+    return '\n'.join(line for line in lines if line).strip()
+
+
+def _extract_tag_text(block, tag):
+    match = re.search(rf'<{tag}[^>]*>(.*?)</{tag}>', block or '', re.S)
+    return _clean_record_text(match.group(1)) if match else ''
+
+
+def _extract_attr_text(attrs, name):
+    match = re.search(rf'{name}="([^"]*)"', attrs or '')
+    return html.unescape(match.group(1)) if match else ''
+
+
+def _contains_forwarded_record_markup(text):
+    return bool(text and '<recorditem' in text and '<dataitem' in text)
+
+
+def _iter_dataitem_blocks(content):
+    """Yield top-level dataitem blocks while preserving nested dataitems for recursion."""
+    pos = 0
+    close_tag = '</dataitem>'
+    while True:
+        match = _DATAITEM_OPEN_RE.search(content, pos)
+        if not match:
+            break
+        open_pos = match.start()
+        open_end = content.find('>', open_pos)
+        if open_end == -1:
+            break
+
+        attrs = content[open_pos + len('<dataitem'):open_end]
+        depth = 1
+        cursor = open_end + 1
+        while depth > 0:
+            next_match = _DATAITEM_OPEN_RE.search(content, cursor)
+            next_open = next_match.start() if next_match else -1
+            next_close = content.find(close_tag, cursor)
+            if next_close == -1:
+                return
+            if next_open != -1 and next_open < next_close:
+                nested_open_end = content.find('>', next_open)
+                if nested_open_end == -1:
+                    return
+                depth += 1
+                cursor = nested_open_end + 1
+                continue
+
+            depth -= 1
+            if depth == 0:
+                yield attrs, content[open_end + 1:next_close]
+                pos = next_close + len(close_tag)
+                break
+            cursor = next_close + len(close_tag)
+
+
+def _extract_nested_forwarded_record_payload(body):
+    decoded = html.unescape(body or '')
+    if _contains_forwarded_record_markup(decoded):
+        return decoded
+    return ''
+
+
+def _count_forwarded_record_items(items):
+    total = 0
+    for item in items:
+        total += 1
+        total += _count_forwarded_record_items(item.get('children') or [])
+    return total
+
+
 def _parse_xml_root(content):
     if not content or len(content) > _XML_PARSE_MAX_LEN or _XML_UNSAFE_RE.search(content):
         return None
@@ -147,6 +238,68 @@ def _parse_int(value, fallback=0):
         return int(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def _format_record_item_time(value):
+    value = (value or '').strip()
+    if not value:
+        return ''
+    try:
+        return datetime.fromtimestamp(int(value)).strftime('%Y-%m-%d %H:%M:%S')
+    except (TypeError, ValueError, OSError, OverflowError):
+        return value
+
+
+def parse_forwarded_record_items(content, depth=0, max_depth=_FORWARDED_RECORD_MAX_DEPTH):
+    """解析微信“合并聊天记录”卡片内的 recorditem/dataitem。
+
+    这类消息通常是 type=49/subtype=19 的 appmsg。普通 history/export 只能
+    展示外层摘要；这里展开本地已缓存的 dataitem 文本，并自动递归解析嵌套
+    的合并聊天记录。
+    """
+    if not content:
+        return []
+    if '<dataitem' not in content and ('&lt;dataitem' in content or '&lt;recorditem' in content):
+        content = html.unescape(content)
+    if '<dataitem' not in content:
+        return []
+
+    items = []
+    for index, (attrs, body) in enumerate(_iter_dataitem_blocks(content), 1):
+        datatype = _extract_attr_text(attrs, 'datatype')
+        title = _extract_tag_text(body, 'datatitle')
+        desc = _extract_tag_text(body, 'datadesc')
+        type_label = FORWARDED_RECORD_TYPE_LABELS.get(datatype, f'类型{datatype}' if datatype else '未知')
+
+        children = []
+        if depth < max_depth:
+            nested_payload = _extract_nested_forwarded_record_payload(body)
+            if nested_payload:
+                children = parse_forwarded_record_items(nested_payload, depth=depth + 1, max_depth=max_depth)
+
+        if children:
+            type_label = '合并聊天记录'
+
+        text = desc or title
+        if children and _contains_forwarded_record_markup(text):
+            text = title
+        if not text:
+            text = f'[{type_label}]'
+        item = {
+            'index': index,
+            'datatype': datatype,
+            'type': type_label,
+            'source': _extract_tag_text(body, 'sourcename') or '',
+            'time': _format_record_item_time(
+                _extract_tag_text(body, 'sourcetime') or _extract_tag_text(body, 'srcMsgCreateTime')
+            ),
+            'text': text,
+        }
+        if children:
+            item['children'] = children
+            item['nested_count'] = _count_forwarded_record_items(children)
+        items.append(item)
+    return items
 
 
 def _format_app_message_text(content, local_type, is_group, chat_username, chat_display_name, names, _display_name_fn, resolve_media=False, db_dir=None, create_time_ts=0):
@@ -528,6 +681,35 @@ def _build_history_line(row, ctx, names, id_to_username, display_name_fn, resolv
     return create_time, f'[{time_str}] {text}'
 
 
+def _build_forwarded_record(row, ctx, names, id_to_username, display_name_fn):
+    local_id, local_type, create_time, real_sender_id, content, ct = row
+    base_type, _ = _split_msg_type(local_type)
+    if base_type != 49:
+        return None
+    content = decompress_content(content, ct)
+    if not content or '<recorditem' not in content:
+        return None
+    items = parse_forwarded_record_items(content)
+    if not items:
+        return None
+    sender_from_content, _ = _parse_message_content(content, local_type, ctx['is_group'])
+    sender_label = _resolve_sender_label(
+        real_sender_id, sender_from_content, ctx['is_group'], ctx['username'],
+        ctx['display_name'], names, id_to_username, display_name_fn
+    )
+    return create_time, {
+        'local_id': local_id,
+        'time': datetime.fromtimestamp(create_time).strftime('%Y-%m-%d %H:%M:%S'),
+        'timestamp': create_time,
+        'sender': sender_label,
+        'title': _extract_tag_text(content, 'title'),
+        'summary': _extract_tag_text(content, 'des'),
+        'item_count': len(items),
+        'expanded_item_count': _count_forwarded_record_items(items),
+        'items': items,
+    }
+
+
 def _build_search_entry(row, ctx, names, id_to_username, display_name_fn, resolve_media=False, db_dir=None):
     local_id, local_type, create_time, real_sender_id, content, ct = row
     content = decompress_content(content, ct)
@@ -583,6 +765,50 @@ def collect_chat_history(ctx, names, display_name_fn, start_ts=None, end_ts=None
 
     paged = _page_ranked_entries(collected, limit, offset)
     return [line for _, line in paged], failures
+
+
+def collect_forwarded_records(ctx, names, display_name_fn, start_ts=None, end_ts=None, limit=20, offset=0, scan_limit=_FORWARDED_RECORD_SCAN_LIMIT_DEFAULT):
+    """收集指定聊天里的“合并聊天记录”卡片并展开内层消息。"""
+    collected = []
+    failures = []
+    candidate_limit = _candidate_page_size(limit, offset)
+    batch_size = min(_FORWARDED_RECORD_QUERY_BATCH_SIZE, max(candidate_limit, 50))
+    scan_limit = max(scan_limit, candidate_limit)
+
+    for table_ctx in _iter_table_contexts(ctx):
+        try:
+            with closing(sqlite3.connect(table_ctx['db_path'])) as conn:
+                id_to_username = _load_name2id_maps(conn)
+                fetch_offset = 0
+                scanned = 0
+                before = len(collected)
+                while scanned < scan_limit and len(collected) - before < candidate_limit:
+                    rows = _query_messages(
+                        conn, table_ctx['table_name'],
+                        start_ts=start_ts, end_ts=end_ts,
+                        limit=batch_size, offset=fetch_offset,
+                        msg_type_filter=(49,),
+                    )
+                    if not rows:
+                        break
+                    fetch_offset += len(rows)
+                    scanned += len(rows)
+                    for row in rows:
+                        try:
+                            record = _build_forwarded_record(row, table_ctx, names, id_to_username, display_name_fn)
+                            if record:
+                                collected.append(record)
+                                if len(collected) - before >= candidate_limit:
+                                    break
+                        except Exception as e:
+                            failures.append(f"local_id={row[0]}: {e}")
+                    if len(rows) < batch_size:
+                        break
+        except Exception as e:
+            failures.append(f"{table_ctx['db_path']}: {e}")
+
+    paged = _page_ranked_entries(collected, limit, offset)
+    return [record for _, record in paged], failures
 
 
 # ---- 搜索查询 ----

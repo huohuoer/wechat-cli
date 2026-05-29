@@ -8,7 +8,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](https://github.com/freestylefly/wechat-cli)
 
-Chat history · Contacts · Sessions · Favorites · Statistics · Export
+Chat history · Forwarded records · Contacts · Sessions · Favorites · Statistics · Export
 
 [中文文档](README_CN.md)
 
@@ -19,7 +19,7 @@ Chat history · Contacts · Sessions · Favorites · Statistics · Export
 ## ✨ Highlights
 
 - **🚀 Zero-config install** — `npm install -g` and you're done, no Python needed
-- **📦 11 commands** — sessions, history, search, contacts, members, stats, export, favorites, unread, new-messages, init
+- **📦 12 commands** — sessions, history, records, search, contacts, members, stats, export, favorites, unread, new-messages, init
 - **🤖 AI-first** — JSON output by default, designed for LLM agent tool calls
 - **🔒 Fully local** — on-the-fly SQLCipher decryption, data never leaves your machine
 - **📊 Rich analytics** — top senders, message type breakdown, 24-hour activity charts
@@ -153,6 +153,7 @@ EOF
 ```bash
 wechat-cli sessions                        # Recent chats
 wechat-cli history "Alice" --limit 20      # Chat messages
+wechat-cli records "Alice" --format text   # Expand forwarded chat records
 wechat-cli search "deadline" --chat "Team" # Search messages
 ```
 
@@ -174,6 +175,7 @@ You can use `wechat-cli` to query my local WeChat data.
 Common commands:
 - `wechat-cli sessions --limit 10` — list recent chats
 - `wechat-cli history "NAME" --limit 20 --format text` — read chat history
+- `wechat-cli records "NAME" --limit 5 --format text` — expand forwarded/merged chat records
 - `wechat-cli search "KEYWORD" --chat "CHAT_NAME"` — search messages
 - `wechat-cli contacts --query "NAME"` — search contacts
 - `wechat-cli unread` — show unread sessions
@@ -197,6 +199,9 @@ wechat-cli sessions --limit 5
 
 # Read specific chat
 wechat-cli history "Alice" --limit 30 --format text
+
+# Expand forwarded/merged chat records
+wechat-cli records "Alice" --limit 5 --format text
 
 # Search with filters
 wechat-cli search "report" --type file --limit 10
@@ -228,6 +233,19 @@ wechat-cli history "Alice" --format text
 ```
 
 **Options:** `--limit`, `--offset`, `--start-time`, `--end-time`, `--type`, `--format`
+
+### `records` — Forwarded Chat Records
+
+Expand WeChat "forwarded/merged chat record" cards into their inner messages.
+Nested forwarded records are expanded automatically.
+
+```bash
+wechat-cli records "Alice"                         # Last 20 forwarded records
+wechat-cli records "Alice" --limit 5 --format text
+wechat-cli records "Team" --start-time "2026-04-01" --output records.json
+```
+
+**Options:** `--limit`, `--offset`, `--scan-limit`, `--start-time`, `--end-time`, `--format`, `--output`
 
 ### `search` — Search Messages
 
