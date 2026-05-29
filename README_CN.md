@@ -8,7 +8,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](https://github.com/freestylefly/wechat-cli)
 
-聊天记录 · 联系人 · 会话 · 收藏 · 统计 · 导出
+聊天记录 · 合并记录展开 · 联系人 · 会话 · 收藏 · 统计 · 导出
 
 [English](README.md)
 
@@ -19,7 +19,7 @@
 ## ✨ 功能亮点
 
 - **🚀 开箱即用** — `npm install -g` 一键安装，无需 Python
-- **📦 11 个命令** — sessions、history、search、contacts、members、stats、export、favorites、unread、new-messages、init
+- **📦 12 个命令** — sessions、history、records、search、contacts、members、stats、export、favorites、unread、new-messages、init
 - **🤖 AI 优先** — 默认 JSON 输出，专为 LLM Agent 工具调用设计
 - **🔒 全程本地** — SQLCipher 即时解密，数据不出本机
 - **📊 丰富统计** — 发言排行、消息类型分布、24 小时活跃图
@@ -151,6 +151,7 @@ EOF
 ```bash
 wechat-cli sessions                        # 最近会话
 wechat-cli history "张三" --limit 20       # 聊天记录
+wechat-cli records "张三" --format text    # 展开合并聊天记录
 wechat-cli search "截止日期" --chat "项目组" # 搜索消息
 ```
 
@@ -172,6 +173,7 @@ WeChat CLI 专为 AI Agent 设计，所有命令默认输出结构化 JSON。
 常用命令：
 - `wechat-cli sessions --limit 10` — 列出最近会话
 - `wechat-cli history "名称" --limit 20 --format text` — 读取聊天记录
+- `wechat-cli records "名称" --limit 5 --format text` — 展开合并聊天记录
 - `wechat-cli search "关键词" --chat "聊天名"` — 搜索消息
 - `wechat-cli contacts --query "名称"` — 搜索联系人
 - `wechat-cli unread` — 显示未读会话
@@ -195,6 +197,9 @@ wechat-cli sessions --limit 5
 
 # 读取指定聊天
 wechat-cli history "张三" --limit 30 --format text
+
+# 展开合并聊天记录
+wechat-cli records "张三" --limit 5 --format text
 
 # 带过滤条件搜索
 wechat-cli search "报告" --type file --limit 10
@@ -226,6 +231,19 @@ wechat-cli history "张三" --format text
 ```
 
 **选项：** `--limit`、`--offset`、`--start-time`、`--end-time`、`--type`、`--format`
+
+### `records` — 合并聊天记录展开
+
+展开微信“合并聊天记录”卡片里的内层消息。
+嵌套的合并聊天记录会自动递归展开。
+
+```bash
+wechat-cli records "张三"                         # 最近 20 条合并聊天记录
+wechat-cli records "张三" --limit 5 --format text
+wechat-cli records "群聊" --start-time "2026-04-01" --output records.json
+```
+
+**选项：** `--limit`、`--offset`、`--scan-limit`、`--start-time`、`--end-time`、`--format`、`--output`
 
 ### `search` — 搜索消息
 
