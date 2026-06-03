@@ -17,6 +17,7 @@ _XML_UNSAFE_RE = re.compile(r'<!DOCTYPE|<!ENTITY', re.IGNORECASE)
 _XML_PARSE_MAX_LEN = 20000
 _QUERY_LIMIT_MAX = 500
 _HISTORY_QUERY_BATCH_SIZE = 500
+_RESOURCE_HASH_RE = re.compile(rb'[a-fA-F0-9]{32}')
 
 # 消息类型过滤映射: 名称 -> (base_type,) 或 (base_type, sub_type)
 MSG_TYPE_FILTERS = {
@@ -133,7 +134,20 @@ def _collapse_text(text):
     return re.sub(r'\s+', ' ', text).strip()
 
 
+def _xml_payload(content):
+    if not content:
+        return content
+    text = content.strip()
+    if text.startswith("<"):
+        return text
+    start = text.find("<msg")
+    if start >= 0:
+        return text[start:]
+    return text
+
+
 def _parse_xml_root(content):
+    content = _xml_payload(content)
     if not content or len(content) > _XML_PARSE_MAX_LEN or _XML_UNSAFE_RE.search(content):
         return None
     try:
@@ -380,6 +394,382 @@ def _resolve_sender_label(real_sender_id, sender_from_content, is_group, chat_us
     return ''
 
 
+def _resolve_sender_identity(real_sender_id, sender_from_content, is_group, chat_username, names, id_to_username, display_name_fn):
+    sender_username = id_to_username.get(real_sender_id, '')
+    if is_group:
+        if sender_username and sender_username != chat_username:
+            return sender_username, display_name_fn(sender_username, names)
+        if sender_from_content:
+            return sender_from_content, display_name_fn(sender_from_content, names)
+    if sender_username:
+        return sender_username, display_name_fn(sender_username, names)
+    return '', ''
+
+
+def _message_type_key(local_type, content=None):
+    base_type, sub_type = _split_msg_type(local_type)
+    if base_type == 49 and content:
+        root = _parse_xml_root(content)
+        if root is not None:
+            appmsg = root.find('.//appmsg')
+            if appmsg is not None:
+                app_type = _parse_int((appmsg.findtext('type') or '').strip(), _parse_int(sub_type, 0))
+                if app_type == 6:
+                    return 'file'
+                if app_type == 5:
+                    return 'link'
+                if app_type in (33, 36, 44):
+                    return 'mini_program'
+                if app_type == 57:
+                    return 'quote'
+        return 'app'
+    return {
+        1: 'text',
+        3: 'image',
+        34: 'voice',
+        42: 'contact_card',
+        43: 'video',
+        47: 'sticker',
+        48: 'location',
+        50: 'call',
+        10000: 'system',
+        10002: 'recall',
+    }.get(base_type, f'type_{base_type}')
+
+
+def _iter_xml_strings(content):
+    root = _parse_xml_root(content)
+    if root is None:
+        return
+    for elem in root.iter():
+        for value in elem.attrib.values():
+            if value:
+                yield value
+        if elem.text:
+            yield elem.text
+
+
+def _extract_media_tokens(content):
+    tokens = set()
+    if not content:
+        return tokens
+    values = list(_iter_xml_strings(content) or [])
+    values.append(content)
+    for value in values:
+        value = value.strip()
+        if not value:
+            continue
+        base = os.path.basename(value)
+        if base and base != value:
+            tokens.add(base)
+            tokens.add(os.path.splitext(base)[0])
+        for match in re.findall(r'[\w.-]{4,}\.(?:dat|jpg|jpeg|png|gif|webp|mp4|mov|m4v|m4a|amr|aud|silk|wav|pdf|docx?|xlsx?|pptx?|zip|rar|7z|txt)', value, flags=re.IGNORECASE):
+            tokens.add(os.path.basename(match))
+            tokens.add(os.path.splitext(os.path.basename(match))[0])
+        for match in re.findall(r'\b[a-fA-F0-9]{16,64}\b', value):
+            tokens.add(match)
+    return {t for t in tokens if t}
+
+
+def _find_by_title(directory, title):
+    if not title or not os.path.isdir(directory):
+        return None
+    target = os.path.join(directory, title)
+    if os.path.isfile(target):
+        return target
+    for filename in os.listdir(directory):
+        if title in filename or filename in title:
+            path = os.path.join(directory, filename)
+            if os.path.isfile(path):
+                return path
+    return None
+
+
+def _find_media_candidate(search_dirs, tokens=None, exclude_suffixes=()):
+    tokens = tokens or set()
+    files = []
+    for directory in search_dirs:
+        if not directory or not os.path.isdir(directory):
+            continue
+        for filename in os.listdir(directory):
+            if any(filename.endswith(suffix) for suffix in exclude_suffixes):
+                continue
+            path = os.path.join(directory, filename)
+            if os.path.isfile(path):
+                files.append(path)
+    if not files:
+        return None, "local media file not found"
+
+    if tokens:
+        for path in files:
+            name = os.path.basename(path)
+            stem = os.path.splitext(name)[0]
+            if name in tokens or stem in tokens or any(token in name for token in tokens if len(token) >= 8):
+                return path, ""
+
+    if len(files) == 1:
+        return files[0], ""
+    return None, f"ambiguous local media candidates: {len(files)}"
+
+
+def _find_media_by_resource_hash(search_dirs, resource_hash, kind):
+    if not resource_hash:
+        return None
+
+    if kind == "image":
+        exact_names = [
+            f"{resource_hash}.dat", f"{resource_hash}.jpg", f"{resource_hash}.jpeg",
+            f"{resource_hash}.png", f"{resource_hash}.gif", f"{resource_hash}.webp",
+        ]
+        fallback_suffixes = ("_t.dat", "_t.jpg", "_t.jpeg", "_t.png", "_thumb.jpg")
+    elif kind == "video":
+        exact_names = [
+            f"{resource_hash}.mp4", f"{resource_hash}.mov", f"{resource_hash}.m4v",
+            f"{resource_hash}.dat",
+        ]
+        fallback_suffixes = ()
+    else:
+        exact_names = [resource_hash]
+        fallback_suffixes = ()
+
+    for directory in search_dirs:
+        if not directory or not os.path.isdir(directory):
+            continue
+        for filename in exact_names:
+            path = os.path.join(directory, filename)
+            if os.path.isfile(path):
+                return path
+
+    candidates = []
+    for directory in search_dirs:
+        if not directory or not os.path.isdir(directory):
+            continue
+        for filename in os.listdir(directory):
+            if filename.startswith(resource_hash):
+                path = os.path.join(directory, filename)
+                if os.path.isfile(path):
+                    candidates.append(path)
+    if not candidates:
+        return None
+
+    def _candidate_rank(path):
+        name = os.path.basename(path)
+        is_fallback = any(name.endswith(suffix) for suffix in fallback_suffixes)
+        return (is_fallback, -os.path.getsize(path))
+
+    candidates.sort(key=_candidate_rank)
+    return candidates[0]
+
+
+def _chat_attach_dirs(db_dir, chat_username, date_prefix, sub_dir_name):
+    wechat_base = os.path.dirname(db_dir)
+    attach_dir = os.path.join(wechat_base, "msg", "attach")
+    if not os.path.isdir(attach_dir):
+        return []
+    dirs = []
+    if chat_username:
+        chat_hash = hashlib.md5(chat_username.encode()).hexdigest()
+        dirs.append(os.path.join(attach_dir, chat_hash, date_prefix, sub_dir_name))
+    return dirs
+
+
+def _build_media_source(kind, source_path=None, original_filename='', detail=''):
+    return {
+        'kind': kind,
+        'source_path': source_path,
+        'original_filename': original_filename or (os.path.basename(source_path) if source_path else ''),
+        'detail': detail,
+    }
+
+
+def _build_sticker_media_source(info, source_path=None, detail=''):
+    return {
+        'kind': 'sticker',
+        'source_path': source_path,
+        'original_filename': info.get('md5') or (os.path.basename(source_path) if source_path else ''),
+        'detail': detail,
+        'sticker_md5': info.get('md5', ''),
+        'expected_bytes': info.get('len', ''),
+        'width': info.get('width', ''),
+        'height': info.get('height', ''),
+        'product_id': info.get('productid', ''),
+        'aeskey': info.get('aeskey', ''),
+        'cdn_url': info.get('cdnurl', ''),
+        'encrypt_url': info.get('encrypturl', ''),
+    }
+
+
+def _resource_hashes_for_message(resource_index, local_id, base_type, create_time_ts):
+    if not resource_index:
+        return []
+    return resource_index.get((local_id, base_type, create_time_ts), [])
+
+
+def _resolve_export_media_sources(db_dir, local_id, local_type, content, create_time_ts, chat_username, resource_index=None):
+    if not db_dir:
+        return []
+    base_type, _ = _split_msg_type(local_type)
+    wechat_base = os.path.dirname(db_dir)
+    msg_dir = os.path.join(wechat_base, "msg")
+
+    date_prefix = datetime.fromtimestamp(create_time_ts).strftime("%Y-%m") if create_time_ts else ""
+    tokens = _extract_media_tokens(content)
+
+    if base_type == 49 and content:
+        root = _parse_xml_root(content)
+        if root is None:
+            return []
+        appmsg = root.find('.//appmsg')
+        if appmsg is None:
+            return []
+        app_type = _parse_int((appmsg.findtext('type') or '').strip())
+        if app_type != 6:
+            return []
+        title = (appmsg.findtext('title') or '').strip()
+        if not os.path.isdir(msg_dir):
+            return [_build_media_source('file', original_filename=title, detail="WeChat msg storage not found")]
+        file_dir = os.path.join(msg_dir, "file", date_prefix)
+        path = _find_by_title(file_dir, title)
+        detail = "" if path else "local file attachment not found"
+        return [_build_media_source('file', path, title, detail)]
+
+    if base_type == 3:
+        if not os.path.isdir(msg_dir):
+            return [_build_media_source('image', detail="WeChat msg storage not found")]
+        dirs = _chat_attach_dirs(db_dir, chat_username, date_prefix, "Img")
+        resource_hashes = _resource_hashes_for_message(resource_index, local_id, base_type, create_time_ts)
+        for resource_hash in resource_hashes:
+            path = _find_media_by_resource_hash(dirs, resource_hash, "image")
+            if path:
+                return [_build_media_source('image', path)]
+        if resource_hashes:
+            return [_build_media_source('image', detail=f"resource media file not found: {resource_hashes[0]}")]
+        path, detail = _find_media_candidate(dirs, tokens=tokens, exclude_suffixes=("_h.dat",))
+        return [_build_media_source('image', path, detail=detail)]
+
+    if base_type == 43:
+        if not os.path.isdir(msg_dir):
+            return [_build_media_source('video', detail="WeChat msg storage not found")]
+        dirs = _chat_attach_dirs(db_dir, chat_username, date_prefix, "Video")
+        video_dir = os.path.join(msg_dir, "video", date_prefix)
+        if os.path.isdir(video_dir):
+            dirs.append(video_dir)
+        resource_hashes = _resource_hashes_for_message(resource_index, local_id, base_type, create_time_ts)
+        for resource_hash in resource_hashes:
+            path = _find_media_by_resource_hash(dirs, resource_hash, "video")
+            if path:
+                return [_build_media_source('video', path)]
+        path, detail = _find_media_candidate(dirs, tokens=tokens, exclude_suffixes=("_thumb.jpg",))
+        return [_build_media_source('video', path, detail=detail)]
+
+    if base_type == 34:
+        if not os.path.isdir(msg_dir):
+            return [_build_media_source('voice', detail="WeChat msg storage not found")]
+        dirs = _chat_attach_dirs(db_dir, chat_username, date_prefix, "Voice")
+        path, detail = _find_media_candidate(dirs, tokens=tokens)
+        return [_build_media_source('voice', path, detail=detail)]
+
+    if base_type == 47:
+        info = _parse_sticker_info(content)
+        if not info:
+            return [_build_media_source('sticker', detail="sticker XML not found")]
+        path = _find_sticker_cache_path(wechat_base, date_prefix, info.get('md5'))
+        detail = "" if path else "local sticker cache not found"
+        return [_build_sticker_media_source(info, source_path=path, detail=detail)]
+
+    return []
+
+
+def _parse_sticker_info(content):
+    root = _parse_xml_root(content)
+    if root is None:
+        return None
+    emoji = root.find('.//emoji')
+    if emoji is None:
+        return None
+    return {key: (emoji.attrib.get(key) or '').strip() for key in (
+        'md5', 'len', 'width', 'height', 'productid', 'aeskey', 'cdnurl', 'encrypturl'
+    )}
+
+
+def _find_sticker_cache_path(wechat_base, date_prefix, sticker_md5):
+    if not sticker_md5:
+        return None
+    prefix = sticker_md5[:2]
+    candidates = [
+        os.path.join(wechat_base, "cache", date_prefix, "Emoticon", prefix, sticker_md5),
+        os.path.join(wechat_base, "cache", date_prefix, "Emoticon", sticker_md5),
+        os.path.join(wechat_base, "business", "emoticon", "Persist", prefix, sticker_md5),
+        os.path.join(wechat_base, "business", "emoticon", "Thumb", prefix, f"{sticker_md5}.thumb"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _extract_resource_hashes(packed_info):
+    if not packed_info:
+        return []
+    if isinstance(packed_info, str):
+        data = packed_info.encode("utf-8", errors="ignore")
+    else:
+        data = bytes(packed_info)
+    seen = set()
+    hashes = []
+    for match in _RESOURCE_HASH_RE.findall(data):
+        value = match.decode("ascii").lower()
+        if value not in seen:
+            seen.add(value)
+            hashes.append(value)
+    return hashes
+
+
+def load_chat_resource_index(resource_db_path, chat_username, start_ts=None, end_ts=None):
+    if not resource_db_path:
+        return {}, []
+
+    index = {}
+    failures = []
+    try:
+        with closing(sqlite3.connect(resource_db_path)) as conn:
+            row = conn.execute(
+                "SELECT rowid FROM ChatName2Id WHERE user_name = ?",
+                (chat_username,)
+            ).fetchone()
+            if not row:
+                return index, failures
+
+            clauses = ["i.chat_id = ?"]
+            params = [row[0]]
+            if start_ts is not None:
+                clauses.append("i.message_create_time >= ?")
+                params.append(start_ts)
+            if end_ts is not None:
+                clauses.append("i.message_create_time <= ?")
+                params.append(end_ts)
+
+            sql = f"""
+                SELECT i.message_local_id, i.message_local_type, i.message_create_time, i.packed_info
+                FROM MessageResourceInfo i
+                WHERE {' AND '.join(clauses)}
+                ORDER BY i.message_create_time, i.message_local_id
+            """
+            for local_id, local_type, create_time, packed_info in conn.execute(sql, params):
+                hashes = _extract_resource_hashes(packed_info)
+                if not hashes:
+                    continue
+                base_type, _ = _split_msg_type(local_type)
+                key = (local_id, base_type, create_time)
+                bucket = index.setdefault(key, [])
+                for resource_hash in hashes:
+                    if resource_hash not in bucket:
+                        bucket.append(resource_hash)
+    except sqlite3.Error as e:
+        failures.append(f"{resource_db_path}: {e}")
+    return index, failures
+
+
 # ---- SQL 查询 ----
 
 def _build_message_filters(start_ts=None, end_ts=None, keyword='', msg_type_filter=None):
@@ -528,6 +918,43 @@ def _build_history_line(row, ctx, names, id_to_username, display_name_fn, resolv
     return create_time, f'[{time_str}] {text}'
 
 
+def _build_export_record(row, ctx, names, id_to_username, display_name_fn, db_dir=None, resource_index=None):
+    local_id, local_type, create_time, real_sender_id, content, ct = row
+    content = decompress_content(content, ct)
+    if content is None:
+        content = '(无法解压)'
+
+    sender_from_content, _ = _parse_message_content(content, local_type, ctx['is_group'])
+    sender_username, sender_name = _resolve_sender_identity(
+        real_sender_id, sender_from_content, ctx['is_group'], ctx['username'], names, id_to_username, display_name_fn
+    )
+    _, text = _format_message_text(
+        local_id, local_type, content, ctx['is_group'], ctx['username'], ctx['display_name'], names, display_name_fn,
+        db_dir=db_dir, create_time_ts=create_time, resolve_media=False,
+    )
+    base_type, sub_type = _split_msg_type(local_type)
+    media_sources = _resolve_export_media_sources(
+        db_dir, local_id, local_type, content, create_time, ctx['username'], resource_index=resource_index
+    )
+    return create_time, {
+        'local_id': local_id,
+        'type': _message_type_key(local_type, content),
+        'type_label': format_msg_type(local_type),
+        'local_type': local_type,
+        'base_type': base_type,
+        'sub_type': sub_type,
+        'create_time': create_time,
+        'time': datetime.fromtimestamp(create_time).isoformat(sep=' ', timespec='seconds'),
+        'sender': {
+            'username': sender_username or None,
+            'name': sender_name or None,
+        },
+        'text': text,
+        'media': [],
+        '_media_sources': media_sources,
+    }
+
+
 def _build_search_entry(row, ctx, names, id_to_username, display_name_fn, resolve_media=False, db_dir=None):
     local_id, local_type, create_time, real_sender_id, content, ct = row
     content = decompress_content(content, ct)
@@ -583,6 +1010,52 @@ def collect_chat_history(ctx, names, display_name_fn, start_ts=None, end_ts=None
 
     paged = _page_ranked_entries(collected, limit, offset)
     return [line for _, line in paged], failures
+
+
+def collect_chat_export_records(ctx, names, display_name_fn, start_ts=None, end_ts=None, limit=None, db_dir=None, resource_db_path=None):
+    collected = []
+    failures = []
+    batch_size = _HISTORY_QUERY_BATCH_SIZE
+    resource_index, resource_failures = load_chat_resource_index(
+        resource_db_path, ctx['username'], start_ts=start_ts, end_ts=end_ts
+    )
+    failures.extend(resource_failures)
+
+    for table_ctx in _iter_table_contexts(ctx):
+        try:
+            with closing(sqlite3.connect(table_ctx['db_path'])) as conn:
+                id_to_username = _load_name2id_maps(conn)
+                fetch_offset = 0
+                table_count = 0
+                while True:
+                    page_limit = batch_size if limit is None else min(batch_size, max(limit - table_count, 0))
+                    if page_limit <= 0:
+                        break
+                    rows = _query_messages(
+                        conn, table_ctx['table_name'],
+                        start_ts=start_ts, end_ts=end_ts,
+                        limit=page_limit, offset=fetch_offset,
+                    )
+                    if not rows:
+                        break
+                    fetch_offset += len(rows)
+                    for row in rows:
+                        try:
+                            collected.append(_build_export_record(row, table_ctx, names, id_to_username, display_name_fn, db_dir=db_dir, resource_index=resource_index))
+                        except Exception as e:
+                            failures.append(f"local_id={row[0]}: {e}")
+                    table_count += len(rows)
+                    if limit is not None and table_count >= limit:
+                        break
+                    if len(rows) < page_limit:
+                        break
+        except Exception as e:
+            failures.append(f"{table_ctx['db_path']}: {e}")
+
+    ordered = sorted(collected, key=lambda item: item[0])
+    if limit is not None:
+        ordered = ordered[-limit:]
+    return [record for _, record in ordered], failures
 
 
 # ---- 搜索查询 ----

@@ -9,6 +9,7 @@ description = "WeChat data query CLI for LLMs"
 requires-python = ">=3.10"
 dependencies = [
     "click>=8.1,<9",
+    "pillow>=10,<12",
     "pycryptodome>=3.19,<4",
     "zstandard>=0.22,<1",
 ]
