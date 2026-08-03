@@ -117,6 +117,13 @@ wechat-cli init
 
 未开启此权限会导致工具无法访问微信数据目录，密钥提取将失败。
 
+Apple Silicon 上的新版微信可能不再把所有数据库 key 保存在旧版
+`x'<key><salt>'` 内存格式中。遇到这种情况时，`init` 会额外使用不依赖
+符号名和固定地址的运行时 codec 特征定位，并且只有派生 AES/HMAC key
+同时通过数据库加密页校验后才会采信。运行 `init` 时请保持微信处于活跃
+状态并打开相关聊天，让目标数据库实际处理页面。已有 key 会先重新验页并
+保留；扫描失败不会用空结果覆盖 key 文件。
+
 #### macOS 遇到 `task_for_pid failed` 错误？
 
 在某些 macOS 系统上，即使使用了 `sudo`，`init` 也可能报 `task_for_pid failed`。这是 macOS 的安全策略限制了进程内存访问。

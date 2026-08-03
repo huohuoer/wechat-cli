@@ -119,6 +119,14 @@ Before running `init`, make sure your terminal app has **Full Disk Access**:
 
 Without this permission, the tool cannot access WeChat's data directory and key extraction will fail.
 
+On Apple Silicon, newer WeChat builds may no longer keep every database key in
+the legacy `x'<key><salt>'` memory format. When that happens, `init` also tries a
+symbol-independent runtime codec hook and accepts a derived AES/HMAC key pair
+only after both parts verify against an encrypted database page. Keep WeChat
+active and open the relevant chat while `init` runs so the database processes a
+page. Previously saved keys are re-verified and preserved; a failed scan never
+replaces the key file with an empty result.
+
 #### macOS: `task_for_pid failed` Error
 
 On some macOS systems, `init` may fail with `task_for_pid failed` even when running with `sudo`. This is due to macOS security restrictions on process memory access.
