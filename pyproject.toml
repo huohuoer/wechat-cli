@@ -18,6 +18,7 @@ wechat-cli = "wechat_cli.main:cli"
 
 [tool.setuptools.packages.find]
 where = ["."]
+exclude = ["tests*", "build*"]
 
 [tool.setuptools.package-data]
-wechat_cli = ["bin/*"]
+wechat_cli = ["bin/*", "keys/codec_capture_lldb.py"]

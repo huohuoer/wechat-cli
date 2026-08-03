@@ -11,6 +11,8 @@ import os
 import re
 import struct
 
+from Crypto.Cipher import AES
+
 PAGE_SZ = 4096
 KEY_SZ = 32
 SALT_SZ = 16
@@ -26,6 +28,41 @@ def verify_enc_key(enc_key, db_page1):
     hm = hmac_mod.new(mac_key, hmac_data, hashlib.sha512)
     hm.update(struct.pack("<I", 1))
     return hm.digest() == stored_hmac
+
+
+def verify_derived_keys(enc_key, hmac_key, db_page1):
+    """Verify a runtime SQLCipher encryption/HMAC key pair against page 1."""
+    if len(enc_key) != KEY_SZ or len(hmac_key) != KEY_SZ:
+        return False
+    if len(db_page1) != PAGE_SZ:
+        return False
+
+    hmac_start = PAGE_SZ - 64
+    authenticated = db_page1[SALT_SZ:hmac_start] + struct.pack("<I", 1)
+    actual_hmac = hmac_mod.new(hmac_key, authenticated, hashlib.sha512).digest()
+    if not hmac_mod.compare_digest(actual_hmac, db_page1[hmac_start:PAGE_SZ]):
+        return False
+
+    reserve_size = 80
+    iv_start = PAGE_SZ - reserve_size
+    iv = db_page1[iv_start:iv_start + 16]
+    encrypted = db_page1[SALT_SZ:iv_start]
+    try:
+        decrypted = AES.new(enc_key, AES.MODE_CBC, iv).decrypt(encrypted)
+    except ValueError:
+        return False
+    if len(decrypted) < 8:
+        return False
+    page_size = int.from_bytes(decrypted[:2], "big")
+    if page_size == 1:
+        page_size = 65536
+    return (
+        page_size == PAGE_SZ
+        and decrypted[2] in (1, 2)
+        and decrypted[3] in (1, 2)
+        and decrypted[4] == reserve_size
+        and decrypted[5:8] == b"\x40\x20\x20"
+    )
 
 
 def collect_db_files(db_dir):

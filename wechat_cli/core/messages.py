@@ -40,7 +40,10 @@ def find_msg_db_keys(all_keys):
     return sorted([
         k for k in all_keys
         if any(v.startswith("message/") for v in key_path_variants(k))
-        and any(re.search(r"message_\d+\.db$", v) for v in key_path_variants(k))
+        and any(
+            re.fullmatch(r"(?:biz_)?message_\d+\.db", os.path.basename(v))
+            for v in key_path_variants(k)
+        )
     ])
 
 
