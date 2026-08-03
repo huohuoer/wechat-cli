@@ -33,6 +33,33 @@ class AppContext:
 
         self.msg_db_keys = find_msg_db_keys(self.all_keys)
 
+        # 发送服务只在 send 真正调用时执行严格预检和按需注入。
+        from .contacts import get_self_username
+        from .messages import _find_msg_tables_for_user
+        from .native_bridge_provider import prepare_native_bridge
+        from .native_sending import NativeSendService
+        from .send_confirmation import MessageConfirmationStore
+        from .send_preflight import verify_pre_injection
+
+        confirmation_store = MessageConfirmationStore(
+            lambda username: _find_msg_tables_for_user(
+                username,
+                self.msg_db_keys,
+                self.cache,
+            )
+        )
+        self.send_service = NativeSendService(
+            app_context=self,
+            preflight=verify_pre_injection,
+            self_username_loader=lambda app: get_self_username(
+                app.db_dir,
+                app.cache,
+                app.decrypted_dir,
+            ),
+            confirmation_store=confirmation_store,
+            bridge_provider=prepare_native_bridge,
+        )
+
         # 确保状态目录存在
         os.makedirs(STATE_DIR, exist_ok=True)
 

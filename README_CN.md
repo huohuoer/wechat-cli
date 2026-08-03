@@ -2,13 +2,13 @@
 
 # WeChat CLI
 
-**命令行查询本地微信数据，专为 AI 集成设计。**
+**命令行查询本地微信数据，并按需后台发送群聊文本。**
 
 [![npm version](https://img.shields.io/npm/v/@canghe_ai/wechat-cli.svg)](https://www.npmjs.com/package/@canghe_ai/wechat-cli)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](https://github.com/freestylefly/wechat-cli)
 
-聊天记录 · 联系人 · 会话 · 收藏 · 统计 · 导出
+聊天记录 · 联系人 · 会话 · 收藏 · 统计 · 导出 · 群聊发送
 
 [English](README.md)
 
@@ -19,9 +19,9 @@
 ## ✨ 功能亮点
 
 - **🚀 开箱即用** — `npm install -g` 一键安装，无需 Python
-- **📦 11 个命令** — sessions、history、search、contacts、members、stats、export、favorites、unread、new-messages、init
+- **📦 12 个命令** — 原有查询命令之外，增加精确群聊后台文本发送 `send`
 - **🤖 AI 优先** — 默认 JSON 输出，专为 LLM Agent 工具调用设计
-- **🔒 全程本地** — SQLCipher 即时解密，数据不出本机
+- **🔒 本地查询** — SQLCipher 即时解密，查询数据不出本机
 - **📊 丰富统计** — 发言排行、消息类型分布、24 小时活跃图
 - **📝 灵活导出** — Markdown 或纯文本，支持时间范围过滤
 
@@ -139,12 +139,14 @@ sudo codesign --force --sign - --entitlements /dev/stdin /Applications/WeChat.ap
 <dict>
     <key>com.apple.security.get-task-allow</key>
     <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
 </dict>
 </plist>
 EOF
 ```
 
-> **温馨提示：** 重新签名是安全的，**不会**导致封号或账号异常。但可能影响微信的部分功能或自动更新。如果发现任何功能异常（如搜一搜无法使用），或想更新到微信最新版，直接从[微信官网](https://mac.weixin.qq.com/)重新下载安装即可，**无需重新执行 init**，已有的配置和密钥不受影响。
+> 重新签名会改变应用签名，可能影响自动更新、部分功能或账号风控。需要恢复时，请从微信官网重新安装。
 
 ### 第二步 — 开始使用
 
@@ -152,6 +154,7 @@ EOF
 wechat-cli sessions                        # 最近会话
 wechat-cli history "张三" --limit 20       # 聊天记录
 wechat-cli search "截止日期" --chat "项目组" # 搜索消息
+wechat-cli send "项目组" "大家好"           # 后台发送群文本
 ```
 
 ---
@@ -255,6 +258,35 @@ wechat-cli members "AI交流群"              # 成员列表
 wechat-cli members "AI交流群" --format text
 ```
 
+### `send` — 后台发送群文本（实验性）
+
+```bash
+wechat-cli send "唯一完整群名" "消息文本"
+wechat-cli send "54597320555@chatroom" $'第一行\n第二行' --timeout 15 --format json
+```
+
+`send` **只能发送群聊文本消息**。它不支持私聊、文件传输助手、图片、文件、语音、视频、表情或其他消息类型。群名必须唯一且完全匹配，也可以使用联系人库中真实存在的 `@chatroom` ID；模糊群名、同名群、伪造的 `@chatroom` ID 和非群聊联系人都会在提交前被拒绝。
+
+发送链路如下：
+
+1. 严格校验 macOS ARM64、WeChat 4.1.8、进程身份、二进制 UUID 与关键函数签名。
+2. 记录目标群发送前的本地消息基线，首次调用时按需加载带本地凭据认证的进程内 bridge。
+3. bridge 在微信主线程调用已固定指纹的官方消息任务构建/提交链；不会聚焦微信窗口，也不会操作输入框或模拟键鼠。
+4. 微信客户端负责正常网络提交并写入自己的本地消息库。CLI 不直接修改微信数据库，只以只读方式轮询确认结果，因此成功消息会出现在手机端和当前 Mac 微信中。
+5. 仅当基线之后出现一条目标、发送者和文本完全一致，且同时具有正 `local_id`、正 `server_id`、文本类型和已发送状态的本地记录时，命令才返回成功。
+
+默认 JSON 成功结果包含 `success`、`status`、`request_id`、`group`、`username`、`local_id` 和 `server_id`。`status: server_accepted` 表示本地库已经观察到服务器分配的消息 ID。
+
+| 退出码 | 含义 | 是否可以重试 |
+|---|---|---|
+| `0` | 已确认服务器接受且 Mac 本地消息可见 | 不需要 |
+| `1` | 群目标不存在、不唯一或不是群聊 | 修正目标后可以 |
+| `2` | 文本或 `timeout` 参数无效 | 修正参数后可以 |
+| `3` | 在提交前发现环境、版本、权限或 bridge 不可用 | 修正环境后可以 |
+| `4` | 已进入提交边界，但最终结果无法确认 | **禁止自动重试** |
+
+消息一旦提交便不可撤销。退出码 `4` / `status: unknown` 表示动作可能已经发生但无法确认，必须人工查看目标群后再决定；微信升级、重新签名失败或权限不足会尽量在提交前拒绝发送。
+
 ### `stats` — 聊天统计
 
 ```bash
@@ -325,9 +357,9 @@ wechat-cli new-messages                    # 后续: 仅返回上次以来的新
 ## 💻 系统要求
 
 - **macOS** ≥ 26.3.1
-- **微信 Mac 版** ≤ 4.1.8.100
+- **微信 Mac 版** 4.1.8
 
-> macOS 老版本或更新的微信版本可能不兼容。
+> `send` 会额外校验 WeChat 4.1.8 的固定二进制指纹。其他微信版本可能不兼容。
 
 ---
 
@@ -340,6 +372,8 @@ wechat-cli new-messages                    # 后续: 仅返回上次以来的新
 | Windows | ✅ 支持 | 读取 Weixin.exe 进程内存 |
 | Linux | ✅ 支持 | 读取 /proc/pid/mem，需要 root |
 
+`send` 目前支持 macOS ARM64 WeChat 4.1.8，并在运行时校验固定二进制指纹。
+
 ---
 
 ## 🔧 工作原理
@@ -349,6 +383,7 @@ wechat-cli new-messages                    # 后续: 仅返回上次以来的新
 1. **提取密钥** — 扫描微信进程内存获取加密密钥（`init`）
 2. **即时解密** — 透明页级 AES-256-CBC 解密，带缓存
 3. **本地查询** — 所有数据留在本机，无需网络访问
+4. **可选后台发送** — `send` 通过当前桌面微信进程提交群文本；查询命令仍只读
 
 ---
 
@@ -360,11 +395,12 @@ wechat-cli new-messages                    # 后续: 仅返回上次以来的新
 
 ## ⚖️ 免责声明
 
-本项目为个人使用的本地数据查询工具，请注意：
+本项目供个人管理本机微信数据及按需发送群文本，请注意：
 
-- **只读不写** — 本工具仅读取本地存储的数据，不会发送、修改或删除任何消息
-- **数据不出本机** — 所有数据仅在你本机处理，不会上传至任何云端服务器
-- **不破坏微信生态** — 本工具不会干扰微信正常运行，不会自动化任何操作，不违反微信使用协议
+- **查询只读** — 查询命令不修改微信数据库；`send` 会产生真实、不可撤销的外部消息副作用
+- **本地处理** — 查询数据不上传到本工具的服务器；发送内容会由微信客户端正常提交给微信服务
+- **版本与账号风险** — `send` 支持 WeChat 4.1.8，并依赖固定二进制指纹和重新签名/进程加载，可能崩溃、失效、影响更新或触发账号风控
+- **未知状态不重试** — 超时或回执不完整时消息可能已经发送，调用方必须人工确认
 - **风险自担** — 本项目仅供个人学习研究使用，使用者需确保遵守当地法律法规
 
 ---

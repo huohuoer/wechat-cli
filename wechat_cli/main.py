@@ -5,8 +5,9 @@ import sys
 import click
 
 from .core.context import AppContext
+from .core.sending import SEND_INIT_ERROR_META_KEY
 
-_VERSION = "0.2.4"
+_VERSION = "0.3.0"
 
 
 @click.group()
@@ -15,7 +16,7 @@ _VERSION = "0.2.4"
               help="config.json 路径（默认自动查找）")
 @click.pass_context
 def cli(ctx, config_path):
-    """WeChat CLI — 查询微信消息、联系人等数据
+    """WeChat CLI — 查询本地微信数据，并按需后台发送群聊文本
 
     \b
     使用示例:
@@ -27,6 +28,7 @@ def cli(ctx, config_path):
       wechat-cli search "Claude" --chat "AI交流群"   # 在指定群里搜索关键词
       wechat-cli search "你好" --limit 50           # 全局搜索
       wechat-cli contacts --query "李"              # 搜索联系人
+      wechat-cli send "AI交流群" "大家好"           # 向精确匹配的群发送文本
       wechat-cli new-messages                       # 获取增量新消息
     """
     # init/version 命令不需要 AppContext
@@ -36,9 +38,15 @@ def cli(ctx, config_path):
     try:
         ctx.obj = AppContext(config_path)
     except FileNotFoundError as e:
+        if ctx.invoked_subcommand == "send":
+            ctx.meta[SEND_INIT_ERROR_META_KEY] = e
+            return
         click.echo(str(e), err=True)
         sys.exit(1)
     except Exception as e:
+        if ctx.invoked_subcommand == "send":
+            ctx.meta[SEND_INIT_ERROR_META_KEY] = e
+            return
         click.echo(f"初始化失败: {e}", err=True)
         sys.exit(1)
 
@@ -55,6 +63,7 @@ from .commands.export import export
 from .commands.stats import stats
 from .commands.unread import unread
 from .commands.favorites import favorites
+from .commands.send import send
 
 cli.add_command(init)
 cli.add_command(sessions)
@@ -67,6 +76,7 @@ cli.add_command(export)
 cli.add_command(stats)
 cli.add_command(unread)
 cli.add_command(favorites)
+cli.add_command(send)
 
 
 if __name__ == "__main__":
