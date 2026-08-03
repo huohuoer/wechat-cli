@@ -2,13 +2,13 @@
 
 # WeChat CLI
 
-**Query your local WeChat data from the command line.**
+**Query local WeChat data and optionally send group text in the background.**
 
 [![npm version](https://img.shields.io/npm/v/@canghe_ai/wechat-cli.svg)](https://www.npmjs.com/package/@canghe_ai/wechat-cli)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](https://github.com/freestylefly/wechat-cli)
 
-Chat history · Contacts · Sessions · Favorites · Statistics · Export
+Chat history · Contacts · Sessions · Favorites · Statistics · Export · Group send
 
 [中文文档](README_CN.md)
 
@@ -19,9 +19,9 @@ Chat history · Contacts · Sessions · Favorites · Statistics · Export
 ## ✨ Highlights
 
 - **🚀 Zero-config install** — `npm install -g` and you're done, no Python needed
-- **📦 11 commands** — sessions, history, search, contacts, members, stats, export, favorites, unread, new-messages, init
+- **📦 12 commands** — all existing query commands plus exact-group background text sending with `send`
 - **🤖 AI-first** — JSON output by default, designed for LLM agent tool calls
-- **🔒 Fully local** — on-the-fly SQLCipher decryption, data never leaves your machine
+- **🔒 Local queries** — on-the-fly SQLCipher decryption; queried data stays on your machine
 - **📊 Rich analytics** — top senders, message type breakdown, 24-hour activity charts
 - **📝 Flexible export** — Markdown or plain text, with time range filtering
 
@@ -141,12 +141,14 @@ sudo codesign --force --sign - --entitlements /dev/stdin /Applications/WeChat.ap
 <dict>
     <key>com.apple.security.get-task-allow</key>
     <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
 </dict>
 </plist>
 EOF
 ```
 
-> **Heads up:** Re-signing WeChat is safe and will **not** cause account issues or bans. However, it may affect WeChat's auto-update mechanism. If you notice any feature not working properly, or want to update WeChat to the latest version, simply re-download and reinstall WeChat from the [official website](https://mac.weixin.qq.com/) — no need to re-run `init`, your existing config and keys will continue to work.
+> Re-signing changes the app signature and may affect auto-update, app features, or account risk controls. Reinstall WeChat from its official site to restore the original app.
 
 ### Step 2 — Use It
 
@@ -154,6 +156,7 @@ EOF
 wechat-cli sessions                        # Recent chats
 wechat-cli history "Alice" --limit 20      # Chat messages
 wechat-cli search "deadline" --chat "Team" # Search messages
+wechat-cli send "Team" "Hello everyone"    # Background group text
 ```
 
 ---
@@ -257,6 +260,35 @@ wechat-cli members "Team Group"            # All members (JSON)
 wechat-cli members "Team Group" --format text
 ```
 
+### `send` — Background Group Text (Experimental)
+
+```bash
+wechat-cli send "Exact Unique Group Name" "Message text"
+wechat-cli send "54597320555@chatroom" $'Line one\nLine two' --timeout 15 --format json
+```
+
+`send` **only sends text messages to group chats**. It does not support direct messages, File Transfer, images, files, voice, video, stickers, or other message types. The group name must be a unique exact match, or a real `@chatroom` ID present in the contact database. Fuzzy names, duplicate group names, forged `@chatroom` IDs, and non-group contacts are rejected before submission.
+
+The send flow is:
+
+1. Strictly verify macOS ARM64, WeChat 4.1.8, process identity, the binary UUID, and pinned function signatures.
+2. Capture the target group's local-message baseline, then load a locally authenticated in-process bridge on the first call.
+3. On WeChat's main thread, the bridge invokes the pinned official message-task builder and submit chain. It does not focus WeChat, use the input box, or simulate keyboard or mouse input.
+4. WeChat performs its normal network submission and writes its own local message record. The CLI never modifies the WeChat database directly; it polls the database read-only, so a confirmed message is visible on both mobile and the current Mac client.
+5. Success is returned only after a post-baseline outgoing text row matches the target, sender, and exact text and has a positive `local_id`, positive `server_id`, text type, and sent status.
+
+The default JSON success result includes `success`, `status`, `request_id`, `group`, `username`, `local_id`, and `server_id`. `status: server_accepted` means the local database contains a server-assigned message ID.
+
+| Exit code | Meaning | Retry guidance |
+|---|---|---|
+| `0` | Server acceptance and Mac-local visibility confirmed | No retry needed |
+| `1` | Target is missing, ambiguous, or not a group | Correct the target, then retry |
+| `2` | Text or `timeout` is invalid | Correct the input, then retry |
+| `3` | Environment, version, permission, or bridge failed before submission | Correct the environment, then retry |
+| `4` | Submission boundary was crossed, but the final result is unknown | **Never retry automatically** |
+
+Submission is irreversible. Exit code `4` / `status: unknown` means the action may have happened but could not be confirmed; inspect the target group manually before deciding what to do. Unsupported builds, signing problems, and missing permissions are rejected before submission whenever they can be identified safely.
+
 ### `stats` — Chat Statistics
 
 ```bash
@@ -327,9 +359,9 @@ The `--type` option (on `history` and `search`):
 ## 💻 System Requirements
 
 - **macOS** ≥ 26.3.1
-- **WeChat for Mac** ≤ 4.1.8.100
+- **WeChat for Mac** 4.1.8
 
-> Older macOS versions or newer WeChat versions may not be compatible.
+> `send` additionally validates a pinned WeChat 4.1.8 binary fingerprint. Other WeChat versions may not be compatible.
 
 ---
 
@@ -342,6 +374,8 @@ The `--type` option (on `history` and `search`):
 | Windows | ✅ Supported | Reads Weixin.exe process memory |
 | Linux | ✅ Supported | Reads /proc/pid/mem, requires root |
 
+`send` currently supports macOS ARM64 WeChat 4.1.8 and validates a pinned binary fingerprint at runtime.
+
 ---
 
 ## 🔧 How It Works
@@ -351,6 +385,7 @@ WeChat stores chat data in SQLCipher-encrypted SQLite databases locally. WeChat 
 1. **Extracts keys** — scans WeChat process memory for encryption keys (`init`)
 2. **Decrypts on-the-fly** — transparent page-level AES-256-CBC decryption with caching
 3. **Queries locally** — all data stays on your machine, no network access
+4. **Optional background send** — `send` submits group text through the running desktop WeChat process; query commands remain read-only
 
 ---
 
@@ -362,11 +397,12 @@ WeChat stores chat data in SQLCipher-encrypted SQLite databases locally. WeChat 
 
 ## ⚖️ Disclaimer
 
-This project is a local data query tool for personal use only. Please note:
+This project is for personal management of local WeChat data and opt-in group text sending. Please note:
 
-- **Read-only** — this tool only reads locally stored data, it does not send, modify, or delete any messages
-- **No cloud transmission** — all data stays on your local machine, nothing is uploaded to any server
-- **No WeChat ecosystem disruption** — this tool does not interfere with WeChat's normal operation, does not automate any actions, and does not violate WeChat's Terms of Service
+- **Read-only queries** — query commands do not modify WeChat databases; `send` creates a real, irreversible external message
+- **Local processing** — queried data is not uploaded to this tool's servers; sent text is submitted normally by the WeChat client
+- **Version and account risk** — `send` supports WeChat 4.1.8 with a pinned binary fingerprint and process loading/re-signing, and may crash, stop working, affect updates, or trigger account controls
+- **Never retry unknown results** — after a timeout or incomplete receipt, the message may already have been sent
 - **Use at your own risk** — this project is for personal learning and research purposes only. Users are responsible for ensuring compliance with local laws and regulations
 
 ---

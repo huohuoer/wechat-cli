@@ -18,6 +18,9 @@ npm/platforms/*/bin/
 venv/
 ENV/
 
+# Local feature worktrees
+.worktrees/
+
 # IDE
 .idea/
 .vscode/

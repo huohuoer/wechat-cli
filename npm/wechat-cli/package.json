@@ -1,7 +1,7 @@
 {
   "name": "@canghe_ai/wechat-cli",
-  "version": "0.2.4",
-  "description": "WeChat data query CLI — chat history, contacts, sessions, favorites, and more. Designed for LLM integration.",
+  "version": "0.3.0",
+  "description": "WeChat local data CLI with experimental background group text sending on macOS ARM64 WeChat 4.1.8.",
   "bin": {
     "wechat-cli": "bin/wechat-cli.js"
   },
@@ -13,7 +13,7 @@
     "install.js"
   ],
   "optionalDependencies": {
-    "@canghe_ai/wechat-cli-darwin-arm64": "0.2.4"
+    "@canghe_ai/wechat-cli-darwin-arm64": "0.3.0"
   },
   "engines": {
     "node": ">=14"
