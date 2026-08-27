@@ -2,7 +2,6 @@
 """Build wechat-cli standalone binaries with PyInstaller."""
 
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +19,37 @@ PLATFORM_MAP = {
 }
 
 
+def current_platform():
+    import platform as host
+
+    system = host.system().lower()
+    machine = host.machine().lower()
+    if system == "darwin":
+        return "darwin-arm64" if machine == "arm64" else "darwin-x64"
+    if system == "windows" and machine in {"amd64", "x86_64"}:
+        return "win32-x64"
+    if system == "linux":
+        return "linux-arm64" if machine in {"arm64", "aarch64"} else "linux-x64"
+    raise RuntimeError(f"Unsupported build host: {system}-{machine}")
+
+
+def build_macos_scanner(platform):
+    source = ROOT / "wechat_cli" / "bin" / "find_all_keys_macos.c"
+    arch = "arm64" if platform == "darwin-arm64" else "x86_64"
+    output_dir = ROOT / "build" / "native" / platform
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output = output_dir / f"find_all_keys_macos.{arch}"
+    subprocess.check_call([
+        "/usr/bin/clang", "-O2", "-arch", arch, str(source),
+        "-framework", "Foundation", "-o", str(output),
+    ])
+    payload = output.read_bytes()
+    if b"[REDACTED]" not in payload or b"%-25s %-66s %s" in payload:
+        output.unlink(missing_ok=True)
+        raise RuntimeError("macOS scanner failed the redaction artifact gate")
+    return output
+
+
 def ensure_pyinstaller():
     try:
         import PyInstaller  # noqa: F401
@@ -31,7 +61,10 @@ def ensure_pyinstaller():
 
 
 def build_platform(platform: str):
-    info = PLATFORM_MAP[platform]
+    host_platform = current_platform()
+    if platform != host_platform:
+        print(f"[-] Refusing cross-labelled build: host={host_platform}, target={platform}")
+        return False
     os_name, arch = platform.split("-")
     ext = ".exe" if os_name == "win32" else ""
     binary_name = f"wechat-cli{ext}"
@@ -54,12 +87,14 @@ def build_platform(platform: str):
         "--clean",
     ]
 
-    # Bundle C binaries for key extraction
-    bin_dir = ROOT / "wechat_cli" / "bin"
-    if bin_dir.exists():
-        for f in bin_dir.iterdir():
-            if not f.name.startswith(".") and f.is_file():
-                cmd.extend(["--add-binary", f"{f}:wechat_cli/bin"])
+    # macOS scanner must be rebuilt from the current source on the matching host.
+    if os_name == "darwin":
+        try:
+            scanner = build_macos_scanner(platform)
+        except (OSError, subprocess.CalledProcessError, RuntimeError) as error:
+            print(f"[-] macOS scanner build/gate failed: {error}")
+            return False
+        cmd.extend(["--add-binary", f"{scanner}:wechat_cli/bin"])
 
     # Hidden imports
     hidden = ["pysqlcipher3", "sqlcipher3", "Cryptodome", "zstandard"]
@@ -91,29 +126,23 @@ def main():
         platforms = sys.argv[1:]
     else:
         # Default: build for current platform only
-        import platform as _pf
-        current = f"{_pf.system().lower()}-{_pf.machine()}"
-        # Normalize
-        if current == "darwin-arm64":
-            platforms = ["darwin-arm64"]
-        elif current == "darwin-x86_64" or current == "darwin-amd64":
-            platforms = ["darwin-x64"]
-        else:
-            # Try to match
-            platforms = []
-            for p in PLATFORM_MAP:
-                os_name, arch = p.split("-")
-                if os_name in current and (arch in current or
-                    (arch == "x64" and ("x86_64" in current or "amd64" in current))):
-                    platforms = [p]
-                    break
-            if not platforms:
-                print(f"Cannot determine platform from '{current}'")
-                print(f"Usage: {sys.argv[0]} [platform...]")
-                print(f"  Platforms: {', '.join(PLATFORM_MAP.keys())}")
-                sys.exit(1)
+        try:
+            platforms = [current_platform()]
+        except RuntimeError as error:
+            print(error)
+            print(f"Usage: {sys.argv[0]} [platform...]")
+            print(f"  Platforms: {', '.join(PLATFORM_MAP.keys())}")
+            sys.exit(1)
 
     print(f"[+] Building for: {', '.join(platforms)}")
+    unknown = [name for name in platforms if name not in PLATFORM_MAP]
+    if unknown:
+        print(f"[-] Unknown platform(s): {', '.join(unknown)}")
+        sys.exit(1)
+    host_platform = current_platform()
+    if any(name != host_platform for name in platforms):
+        print(f"[-] Refusing cross-labelled build: host={host_platform}, targets={platforms}")
+        sys.exit(1)
     ensure_pyinstaller()
 
     results = {}

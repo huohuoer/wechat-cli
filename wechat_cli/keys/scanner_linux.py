@@ -116,8 +116,7 @@ def _check_permissions():
         pass
     raise RuntimeError(
         "需要 root 权限或 CAP_SYS_PTRACE 才能读取进程内存\n"
-        "请使用: sudo wechat-cli init\n"
-        "或授予 capability: sudo setcap cap_sys_ptrace=ep $(which python3)"
+        "请以普通用户运行 wechat-cli init，由工具单独提权扫描 helper"
     )
 
 
@@ -132,6 +131,9 @@ def extract_keys(db_dir, output_path, pid=None):
     Returns:
         dict: salt_hex -> enc_key_hex 映射
     """
+    from .capabilities import require_supported_memory_scan
+
+    require_supported_memory_scan()
     _check_permissions()
 
     print("=" * 60)

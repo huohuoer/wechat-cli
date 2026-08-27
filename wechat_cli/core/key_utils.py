@@ -1,6 +1,7 @@
 """密钥工具 — 路径匹配、元数据剥离"""
 
 import os
+import ntpath
 import posixpath
 
 
@@ -9,8 +10,16 @@ def strip_key_metadata(keys):
 
 
 def _is_safe_rel_path(path):
+    if not isinstance(path, str) or not path or "\x00" in path:
+        return False
     normalized = path.replace("\\", "/")
-    return ".." not in posixpath.normpath(normalized).split("/")
+    components = normalized.split("/")
+    return (
+        not ntpath.splitdrive(path)[0]
+        and not posixpath.isabs(normalized)
+        and not ntpath.isabs(path)
+        and all(component not in ("", ".", "..") for component in components)
+    )
 
 
 def key_path_variants(rel_path):

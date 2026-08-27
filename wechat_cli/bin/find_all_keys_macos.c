@@ -12,19 +12,17 @@
  *   cc -O2 -o find_all_keys_macos find_all_keys_macos.c -framework Foundation
  *
  * Usage:
- *   sudo ./find_all_keys_macos [pid]
- *   If pid is omitted, automatically finds WeChat PID.
+ *   sudo ./find_all_keys_macos --db-dir <db_storage> --output <keys.json> [--pid <pid>]
  *
- * Output: JSON file at ./all_keys.json (compatible with decrypt_db.py)
+ * Output: JSON file at the explicit --output path.
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <dirent.h>
 #include <ftw.h>
-#include <pwd.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -49,6 +47,8 @@ static int read_db_salt(const char *path, char *salt_hex_out);
 static char g_db_salts[MAX_DBS][33];
 static char g_db_names[MAX_DBS][256];
 static int g_db_count = 0;
+static char g_db_root[PATH_MAX];
+static size_t g_db_root_len = 0;
 static int nftw_collect_db(const char *fpath, const struct stat *sb,
                            int typeflag, struct FTW *ftwbuf) {
     (void)sb; (void)ftwbuf;
@@ -61,13 +61,9 @@ static int nftw_collect_db(const char *fpath, const struct stat *sb,
     if (read_db_salt(fpath, salt) != 0) return 0;
 
     strcpy(g_db_salts[g_db_count], salt);
-    /* Extract relative path from db_storage/ */
-    const char *rel = strstr(fpath, "db_storage/");
-    if (rel) rel += strlen("db_storage/");
-    else {
-        rel = strrchr(fpath, '/');
-        rel = rel ? rel + 1 : fpath;
-    }
+    if (strncmp(fpath, g_db_root, g_db_root_len) != 0 ||
+        fpath[g_db_root_len] != '/') return 0;
+    const char *rel = fpath + g_db_root_len + 1;
     strncpy(g_db_names[g_db_count], rel, 255);
     g_db_names[g_db_count][255] = '\0';
     printf("  %s: salt=%s\n", g_db_names[g_db_count], salt);
@@ -80,7 +76,7 @@ static int is_hex_char(unsigned char c) {
 }
 
 static pid_t find_wechat_pid(void) {
-    FILE *fp = popen("pgrep -x WeChat", "r");
+    FILE *fp = popen("/usr/bin/pgrep -x WeChat", "r");
     if (!fp) return -1;
     char buf[64];
     pid_t pid = -1;
@@ -106,11 +102,27 @@ static int read_db_salt(const char *path, char *salt_hex_out) {
 }
 
 int main(int argc, char *argv[]) {
-    pid_t pid;
-    if (argc >= 2)
-        pid = atoi(argv[1]);
-    else
-        pid = find_wechat_pid();
+    umask(0077);
+    pid_t pid = 0;
+    const char *db_storage_path = NULL;
+    const char *out_path = NULL;
+    for (int argi = 1; argi < argc; argi++) {
+        if (strcmp(argv[argi], "--db-dir") == 0 && argi + 1 < argc) {
+            db_storage_path = argv[++argi];
+        } else if (strcmp(argv[argi], "--output") == 0 && argi + 1 < argc) {
+            out_path = argv[++argi];
+        } else if (strcmp(argv[argi], "--pid") == 0 && argi + 1 < argc) {
+            pid = atoi(argv[++argi]);
+        } else {
+            fprintf(stderr, "invalid arguments\n");
+            return 2;
+        }
+    }
+    if (!db_storage_path || !out_path) {
+        fprintf(stderr, "--db-dir and --output are required\n");
+        return 2;
+    }
+    if (pid <= 0) pid = find_wechat_pid();
 
     if (pid <= 0) {
         fprintf(stderr, "WeChat not running or invalid PID\n");
@@ -132,41 +144,18 @@ int main(int argc, char *argv[]) {
     }
     printf("Got task port: %u\n", task);
 
-    /* Resolve real user's HOME (sudo may change HOME to /var/root) */
-    const char *home = getenv("HOME");
-    const char *sudo_user = getenv("SUDO_USER");
-    if (sudo_user) {
-        struct passwd *pw = getpwnam(sudo_user);
-        if (pw && pw->pw_dir)
-            home = pw->pw_dir;
-    }
-    if (!home) home = "/root";
-    printf("User home: %s\n", home);
-
-    /* Collect DB salts by recursively walking db_storage directories.
-     * Note: POSIX glob() does not support ** recursive matching on macOS,
-     * so we use nftw() to walk the directory tree instead. */
+    /* Collect DB salts from the exact selected db_storage tree. */
     printf("\nScanning for DB files...\n");
-    char db_base_dir[512];
-    snprintf(db_base_dir, sizeof(db_base_dir),
-        "%s/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files",
-        home);
-
-    /* Walk each account's db_storage directory */
-    DIR *xdir = opendir(db_base_dir);
-    if (xdir) {
-        struct dirent *ent;
-        while ((ent = readdir(xdir)) != NULL) {
-            if (ent->d_name[0] == '.') continue;
-            char storage_path[768];
-            snprintf(storage_path, sizeof(storage_path),
-                "%s/%s/db_storage", db_base_dir, ent->d_name);
-            struct stat st;
-            if (stat(storage_path, &st) == 0 && S_ISDIR(st.st_mode)) {
-                nftw(storage_path, nftw_collect_db, 20, FTW_PHYS);
-            }
-        }
-        closedir(xdir);
+    struct stat db_stat;
+    if (lstat(db_storage_path, &db_stat) != 0 || !S_ISDIR(db_stat.st_mode) ||
+        realpath(db_storage_path, g_db_root) == NULL) {
+        fprintf(stderr, "invalid db_storage directory\n");
+        return 2;
+    }
+    g_db_root_len = strlen(g_db_root);
+    if (nftw(g_db_root, nftw_collect_db, 20, FTW_PHYS) != 0) {
+        fprintf(stderr, "failed to scan db_storage directory\n");
+        return 1;
     }
     printf("Found %d encrypted DBs\n", g_db_count);
 
@@ -266,10 +255,10 @@ int main(int argc, char *argv[]) {
            total_scanned / 1024 / 1024, region_count, key_count);
 
     /* Match keys to DBs */
-    printf("\n%-25s %-66s %s\n", "Database", "Key", "Salt");
-    printf("%-25s %-66s %s\n",
+    printf("\n%-25s %-12s %s\n", "Database", "Key", "Salt");
+    printf("%-25s %-12s %s\n",
         "-------------------------",
-        "------------------------------------------------------------------",
+        "------------",
         "--------------------------------");
 
     int matched = 0;
@@ -282,9 +271,9 @@ int main(int argc, char *argv[]) {
                 break;
             }
         }
-        printf("%-25s %-66s %s\n",
+        printf("%-25s %-12s %s\n",
             db ? db : "(unknown)",
-            keys[i].key_hex,
+            "[REDACTED]",
             keys[i].salt_hex);
     }
     printf("\nMatched %d/%d keys to known DBs\n", matched, key_count);
@@ -292,28 +281,32 @@ int main(int argc, char *argv[]) {
     /* Save JSON: { "rel/path.db": { "enc_key": "hex" }, ... }
      * Uses forward slashes (native macOS paths, valid JSON without escaping).
      */
-    const char *out_path = "all_keys.json";
     FILE *fp = fopen(out_path, "w");
-    if (fp) {
-        fprintf(fp, "{\n");
-        int first = 1;
-        for (int i = 0; i < key_count; i++) {
-            const char *db = NULL;
-            for (int j = 0; j < g_db_count; j++) {
-                if (strcmp(keys[i].salt_hex, g_db_salts[j]) == 0) {
-                    db = g_db_names[j];
-                    break;
-                }
-            }
-            if (!db) continue;
-            fprintf(fp, "%s  \"%s\": {\"enc_key\": \"%s\"}",
-                first ? "" : ",\n", db, keys[i].key_hex);
-            first = 0;
-        }
-        fprintf(fp, "\n}\n");
-        fclose(fp);
-        printf("Saved to %s\n", out_path);
+    if (!fp) {
+        fprintf(stderr, "failed to open output file\n");
+        return 1;
     }
+    fprintf(fp, "{\n");
+    int first = 1;
+    for (int i = 0; i < key_count; i++) {
+        const char *db = NULL;
+        for (int j = 0; j < g_db_count; j++) {
+            if (strcmp(keys[i].salt_hex, g_db_salts[j]) == 0) {
+                db = g_db_names[j];
+                break;
+            }
+        }
+        if (!db) continue;
+        fprintf(fp, "%s  \"%s\": {\"enc_key\": \"%s\", \"salt\": \"%s\"}",
+            first ? "" : ",\n", db, keys[i].key_hex, keys[i].salt_hex);
+        first = 0;
+    }
+    fprintf(fp, "\n}\n");
+    if (fclose(fp) != 0) {
+        fprintf(stderr, "failed to finalize output file\n");
+        return 1;
+    }
+    printf("Saved to %s\n", out_path);
 
     return 0;
 }

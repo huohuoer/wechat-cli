@@ -83,21 +83,28 @@ Note: Make sure you have Node.js installed first. You can ask your agent to set 
 
 ### Step 1 — Initialize
 
-Make sure WeChat is running, then:
+Start with a read-only check. It does not read WeChat process memory:
 
 ```bash
-# macOS/Linux: may need sudo for memory scanning
-sudo wechat-cli init
-
-# Windows: run in a terminal with sufficient privileges
-wechat-cli init
+wechat-cli doctor
+wechat-cli init --dry-run
 ```
 
-This auto-detects your WeChat data directory, extracts encryption keys, and saves config to `~/.wechat-cli/`.
+`init` now shows a plan by default and does not automatically scan process memory. Prefer an audited helper whose key document is piped only over stdin:
+
+```bash
+trusted-wechat-key-helper | wechat-cli keys import --stdin
+```
+
+Every imported key must pass HMAC verification against its real database first page before state is saved under `~/.wechat-cli/`. A new config/key generation is fully written and read back before `active.json` is switched. Windows uses CurrentUser DPAPI, macOS uses the login Keychain, and Linux uses Secret Service; initialization fails closed when no system key store is available.
+
+Process-memory scanning is a high-risk compatibility path. It requires both `--scan-memory --confirm-memory-scan`, plus an exact accepted capability profile binding platform, client version, valid publisher signature, and scanner algorithm. Unknown clients stop before process-memory read access is requested. No scanner profile is accepted yet, so current builds will not perform a memory scan.
+
+When upgrading from a release with `~/.wechat-cli/all_keys.json`, run `wechat-cli init --force` to migrate. The CLI no longer silently accepts a legacy plaintext key file by default.
 
 ![init-claude-code-1](image/init-claude-code-1.png)
 
-On macOS, you'll need to run the `sudo` command and enter your password:
+On macOS/Linux, the scanner helper may ask for an elevation password:
 
 ![init-claude-code-2](image/init-claude-code-2.png)
 
@@ -123,30 +130,7 @@ Without this permission, the tool cannot access WeChat's data directory and key 
 
 On some macOS systems, `init` may fail with `task_for_pid failed` even when running with `sudo`. This is due to macOS security restrictions on process memory access.
 
-**WeChat CLI will automatically attempt to fix this** by re-signing WeChat with the required entitlement (original entitlements are preserved). Just follow the on-screen instructions:
-
-1. The tool will re-sign WeChat automatically
-2. Quit WeChat completely (not just minimize)
-3. Reopen WeChat and log in
-4. Run `sudo wechat-cli init` again
-
-If auto re-signing fails, you can do it manually:
-
-```bash
-# Quit WeChat first, then:
-sudo codesign --force --sign - --entitlements /dev/stdin /Applications/WeChat.app <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.get-task-allow</key>
-    <true/>
-</dict>
-</plist>
-EOF
-```
-
-> **Heads up:** Re-signing WeChat is safe and will **not** cause account issues or bans. However, it may affect WeChat's auto-update mechanism. If you notice any feature not working properly, or want to update WeChat to the latest version, simply re-download and reinstall WeChat from the [official website](https://mac.weixin.qq.com/) — no need to re-run `init`, your existing config and keys will continue to work.
+WeChat CLI fails closed and leaves `WeChat.app` untouched. It never re-signs, injects into, or modifies the third-party app. Any debugging entitlement must be assessed and applied explicitly by the device administrator. The bundled arm64 scanner is a historical artifact and is rejected until rebuilt from the current C source with the redaction artifact gate; no x86_64 artifact is currently shipped.
 
 ### Step 2 — Use It
 
@@ -337,8 +321,8 @@ The `--type` option (on `history` and `search`):
 
 | Platform | Status | Notes |
 |----------|--------|-------|
-| macOS (Apple Silicon) | ✅ Supported | Bundled arm64 binary |
-| macOS (Intel) | ✅ Supported | x86_64 binary needed |
+| macOS (Apple Silicon) | ⚠️ Rebuild required | Historical arm64 artifact is rejected by the safety gate |
+| macOS (Intel) | ❌ Not shipped | No x86_64 artifact is present |
 | Windows | ✅ Supported | Reads Weixin.exe process memory |
 | Linux | ✅ Supported | Reads /proc/pid/mem, requires root |
 
@@ -348,9 +332,17 @@ The `--type` option (on `history` and `search`):
 
 WeChat stores chat data in SQLCipher-encrypted SQLite databases locally. WeChat CLI:
 
-1. **Extracts keys** — scans WeChat process memory for encryption keys (`init`)
-2. **Decrypts on-the-fly** — transparent page-level AES-256-CBC decryption with caching
+1. **Obtains keys under policy** — imports audited-helper output through stdin and validates it against real database pages; scanning is limited to accepted clients
+2. **Decrypts on-the-fly** — transparent page-level AES-256-CBC decryption in a private per-process cache removed on normal exit
 3. **Queries locally** — all data stays on your machine, no network access
+
+### Key and cache security boundary
+
+- Initialization is stored under `~/.wechat-cli/generations/<id>/`; `active.json` changes only after config and key readback succeeds.
+- `doctor`, `init --dry-run`, and default `init` never read WeChat process memory; unknown clients fail closed before process-memory read access.
+- Initialization and scanner logs report matching state, database paths, and counts without echoing complete keys.
+- Windows uses CurrentUser DPAPI and explicit NTFS ACLs; macOS uses the login Keychain; Linux uses Secret Service. The default is fail-closed when no system key store exists. `WECHAT_CLI_ALLOW_PLAINTEXT_KEYS=1` explicitly enables the compatibility plaintext file backend.
+- Decryption uses a stable DB/WAL snapshot and verifies SQLCipher page HMACs, SQLite WAL checksums, and the last commit frame. Plaintext cache directories hold an exclusive lease; startup removes only well-formed stale runs that are confirmed unlocked.
 
 ---
 

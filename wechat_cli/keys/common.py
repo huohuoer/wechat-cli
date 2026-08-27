@@ -6,10 +6,12 @@
 
 import hashlib
 import hmac as hmac_mod
-import json
 import os
 import re
 import struct
+
+from ..core.key_document import JsonDatabaseKeyProvider
+from ..core.key_utils import _is_safe_rel_path
 
 PAGE_SZ = 4096
 KEY_SZ = 32
@@ -25,7 +27,7 @@ def verify_enc_key(enc_key, db_page1):
     stored_hmac = db_page1[PAGE_SZ - 64: PAGE_SZ]
     hm = hmac_mod.new(mac_key, hmac_data, hashlib.sha512)
     hm.update(struct.pack("<I", 1))
-    return hm.digest() == stored_hmac
+    return hmac_mod.compare_digest(hm.digest(), stored_hmac)
 
 
 def collect_db_files(db_dir):
@@ -35,19 +37,31 @@ def collect_db_files(db_dir):
       db_files: [(rel_path, abs_path, size, salt_hex, page1_bytes), ...]
       salt_to_dbs: {salt_hex: [rel_path, ...]}
     """
+    db_dir = os.path.realpath(db_dir)
     db_files = []
     salt_to_dbs = {}
     for root, dirs, files in os.walk(db_dir):
+        dirs[:] = [name for name in dirs if not os.path.islink(os.path.join(root, name))]
         for name in files:
             if not name.endswith(".db") or name.endswith("-wal") or name.endswith("-shm"):
                 continue
             path = os.path.join(root, name)
+            if os.path.islink(path):
+                continue
+            real_path = os.path.realpath(path)
+            try:
+                if os.path.commonpath((db_dir, real_path)) != db_dir:
+                    continue
+            except ValueError:
+                continue
             size = os.path.getsize(path)
             if size < PAGE_SZ:
                 continue
             with open(path, "rb") as f:
                 page1 = f.read(PAGE_SZ)
             rel = os.path.relpath(path, db_dir)
+            if not _is_safe_rel_path(rel):
+                continue
             salt = page1[:SALT_SZ].hex()
             db_files.append((rel, path, size, salt, page1))
             salt_to_dbs.setdefault(salt, []).append(rel)
@@ -78,7 +92,7 @@ def scan_memory_for_keys(data, hex_re, db_files, salt_to_dbs, key_map,
                         remaining_salts.discard(salt_hex)
                         dbs = salt_to_dbs[salt_hex]
                         print_fn(f"\n  [FOUND] salt={salt_hex}")
-                        print_fn(f"    enc_key={enc_key_hex}")
+                        print_fn("    密钥: [REDACTED]")
                         print_fn(f"    PID={pid} 地址: 0x{addr:016X}")
                         print_fn(f"    数据库: {', '.join(dbs)}")
                         break
@@ -94,7 +108,7 @@ def scan_memory_for_keys(data, hex_re, db_files, salt_to_dbs, key_map,
                     remaining_salts.discard(salt_hex_db)
                     dbs = salt_to_dbs[salt_hex_db]
                     print_fn(f"\n  [FOUND] salt={salt_hex_db}")
-                    print_fn(f"    enc_key={enc_key_hex}")
+                    print_fn("    密钥: [REDACTED]")
                     print_fn(f"    PID={pid} 地址: 0x{addr:016X}")
                     print_fn(f"    数据库: {', '.join(dbs)}")
                     break
@@ -110,7 +124,7 @@ def scan_memory_for_keys(data, hex_re, db_files, salt_to_dbs, key_map,
                         remaining_salts.discard(salt_hex)
                         dbs = salt_to_dbs[salt_hex]
                         print_fn(f"\n  [FOUND] salt={salt_hex} (long hex {hex_len})")
-                        print_fn(f"    enc_key={enc_key_hex}")
+                        print_fn("    密钥: [REDACTED]")
                         print_fn(f"    PID={pid} 地址: 0x{addr:016X}")
                         print_fn(f"    数据库: {', '.join(dbs)}")
                         break
@@ -171,8 +185,7 @@ def save_results(db_files, salt_to_dbs, key_map, output_path, print_fn):
         print_fn(f"\n[!] 未提取到任何密钥")
         raise RuntimeError("未能从任何微信进程中提取到密钥")
 
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
+    JsonDatabaseKeyProvider(output_path).replace(result)
     print_fn(f"\n密钥保存到: {output_path}")
 
     missing = [rel for rel, path, sz, salt_hex, page1 in db_files if salt_hex not in key_map]
