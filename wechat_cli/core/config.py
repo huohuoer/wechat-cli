@@ -1,7 +1,6 @@
 """配置加载 — 从 ~/.wechat-cli/ 读取自包含配置"""
 
 import glob as glob_mod
-import json
 import os
 import platform
 import sys
@@ -148,15 +147,17 @@ def auto_detect_db_dir():
 def load_config(config_path=None):
     """加载配置。默认从 ~/.wechat-cli/config.json 读取。"""
     if config_path is None:
-        config_path = CONFIG_FILE
+        from .state import resolve_config_path
+
+        config_path = resolve_config_path(STATE_DIR, CONFIG_FILE)
 
     cfg = {}
     if os.path.exists(config_path):
-        try:
-            with open(config_path, encoding="utf-8") as f:
-                cfg = json.load(f)
-        except json.JSONDecodeError:
-            cfg = {}
+        from .secure_files import read_private_json
+
+        cfg = read_private_json(config_path)
+        if not isinstance(cfg, dict):
+            raise ValueError("config.json 必须是对象")
 
     # db_dir 缺失时，自动检测
     db_dir = cfg.get("db_dir", "")

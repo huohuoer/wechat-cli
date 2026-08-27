@@ -2,13 +2,13 @@
 
 import os
 import sqlite3
-import xml.etree.ElementTree as ET
 from contextlib import closing
 from datetime import datetime
 
 import click
 
 from ..core.contacts import get_contact_names
+from ..core.xml_utils import parse_untrusted_xml
 from ..output.formatter import output
 
 _FAV_TYPE_MAP = {
@@ -24,9 +24,8 @@ def _parse_fav_content(content, fav_type):
     """从 XML content 提取摘要信息。"""
     if not content:
         return ''
-    try:
-        root = ET.fromstring(content)
-    except ET.ParseError:
+    root = parse_untrusted_xml(content)
+    if root is None:
         return ''
     item = root if root.tag == 'favitem' else root.find('.//favitem')
     if item is None:
@@ -52,7 +51,7 @@ def _parse_fav_content(content, fav_type):
 
 
 @click.command("favorites")
-@click.option("--limit", default=20, help="返回数量")
+@click.option("--limit", default=20, type=click.IntRange(1, 500), help="返回数量（1-500）")
 @click.option("--type", "fav_type", default=None,
               type=click.Choice(list(_FAV_TYPE_FILTERS.keys())),
               help="按类型过滤: text/image/article/card/video")

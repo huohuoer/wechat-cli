@@ -8,7 +8,12 @@ import re
 import subprocess
 import time
 
-from .common import collect_db_files, scan_memory_for_keys, cross_verify_keys, save_results
+from .common import (
+    collect_db_files,
+    cross_verify_keys,
+    save_results,
+    scan_memory_for_keys,
+)
 
 print = functools.partial(print, flush=True)
 
@@ -28,7 +33,8 @@ class MBI(ctypes.Structure):
 
 def _get_pids():
     """返回所有 Weixin.exe 进程的 (pid, mem_kb) 列表，按内存降序"""
-    r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Weixin.exe", "/FO", "CSV", "/NH"],
+    tasklist = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "tasklist.exe")
+    r = subprocess.run([tasklist, "/FI", "IMAGENAME eq Weixin.exe", "/FO", "CSV", "/NH"],
                        capture_output=True, text=True)
     pids = []
     for line in r.stdout.strip().split('\n'):
@@ -82,6 +88,9 @@ def extract_keys(db_dir, output_path, pid=None):
     Returns:
         dict: salt_hex -> enc_key_hex 映射
     """
+    from .capabilities import require_supported_memory_scan
+
+    require_supported_memory_scan()
     print("=" * 60)
     print("  提取所有微信数据库密钥")
     print("=" * 60)

@@ -81,21 +81,28 @@ pip install -e .
 
 ### 第一步 — 初始化
 
-确保微信正在运行，然后：
+先执行只读检查；它不会读取微信进程内存：
 
 ```bash
-# macOS/Linux: 可能需要 sudo 权限
-sudo wechat-cli init
-
-# Windows: 在有足够权限的终端中运行
-wechat-cli init
+wechat-cli doctor
+wechat-cli init --dry-run
 ```
 
-这一步会自动检测微信数据目录、提取加密密钥，并保存到 `~/.wechat-cli/`。
+`init` 默认也只显示计划，不再自动扫描进程内存。推荐由经过审计的独立 helper 生成密钥文档，并仅通过标准输入导入：
+
+```bash
+trusted-wechat-key-helper | wechat-cli keys import --stdin
+```
+
+导入时每个密钥都必须通过对应真实数据库首页的 HMAC 校验，之后才会保存到 `~/.wechat-cli/`。新配置与密钥先写入独立 generation，完整读回后才原子切换。Windows 使用 CurrentUser DPAPI，macOS 使用登录钥匙串，Linux 使用 Secret Service；系统密钥库不可用时默认拒绝写入明文密钥。
+
+内存扫描属于高风险兼容路径，必须同时使用 `--scan-memory --confirm-memory-scan`，并且客户端平台、精确版本、有效发布者签名和扫描算法必须存在于已验收能力清单；未知版本会在申请进程内存读取权限前停止。目前能力清单没有已验收版本，因此不会执行内存扫描。
+
+从旧版本升级且已有 `~/.wechat-cli/all_keys.json` 时，执行 `wechat-cli init --force` 迁移；默认不会继续静默使用旧版明文密钥文件。
 
 ![init-claude-code-1](image/init-claude-code-1.png)
 
-如果是 mac，需要执行 sudo 命令，然后需要输入密码：
+macOS/Linux 扫描 helper 请求提权时，系统可能要求输入密码：
 
 ![init-claude-code-code-2](image/init-claude-code-2.png)
 
@@ -121,30 +128,7 @@ wechat-cli init
 
 在某些 macOS 系统上，即使使用了 `sudo`，`init` 也可能报 `task_for_pid failed`。这是 macOS 的安全策略限制了进程内存访问。
 
-**WeChat CLI 会自动尝试修复此问题**——对微信重新签名以获取必要权限（会保留微信原有权限）。按提示操作即可：
-
-1. 工具会自动对微信重新签名
-2. 完全退出微信（不是最小化）
-3. 重新打开微信并登录
-4. 再次执行 `sudo wechat-cli init`
-
-如果自动签名失败，可以手动执行：
-
-```bash
-# 先退出微信，然后：
-sudo codesign --force --sign - --entitlements /dev/stdin /Applications/WeChat.app <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.get-task-allow</key>
-    <true/>
-</dict>
-</plist>
-EOF
-```
-
-> **温馨提示：** 重新签名是安全的，**不会**导致封号或账号异常。但可能影响微信的部分功能或自动更新。如果发现任何功能异常（如搜一搜无法使用），或想更新到微信最新版，直接从[微信官网](https://mac.weixin.qq.com/)重新下载安装即可，**无需重新执行 init**，已有的配置和密钥不受影响。
+WeChat CLI 会失败关闭并保留原始 `WeChat.app`，不会自动重签、注入或修改第三方应用。调试权限如确有必要，必须由设备管理员独立评估并显式操作。当前仓库内置的 arm64 扫描器是历史产物；在 macOS 上从当前 C 源码重建并通过脱敏产物门禁前，CLI 会拒绝执行它。仓库目前没有 x86_64 产物。
 
 ### 第二步 — 开始使用
 
@@ -335,10 +319,10 @@ wechat-cli new-messages                    # 后续: 仅返回上次以来的新
 
 | 平台 | 状态 | 说明 |
 |------|------|------|
-| macOS (Apple Silicon) | ✅ 支持 | 内置 arm64 二进制 |
-| macOS (Intel) | ✅ 支持 | 需要 x86_64 二进制 |
-| Windows | ✅ 支持 | 读取 Weixin.exe 进程内存 |
-| Linux | ✅ 支持 | 读取 /proc/pid/mem，需要 root |
+| macOS (Apple Silicon) | ⚠️ 需重建 | 历史 arm64 产物被安全门禁拒绝，须从当前源码重建 |
+| macOS (Intel) | ❌ 未提供 | 仓库没有 x86_64 二进制 |
+| Windows | ⚠️ 查询/导入可用 | 内存扫描须命中已验收的精确版本能力清单 |
+| Linux | ⚠️ 查询/导入可用 | 内存扫描须命中已验收的精确版本能力清单 |
 
 ---
 
@@ -346,9 +330,17 @@ wechat-cli new-messages                    # 后续: 仅返回上次以来的新
 
 微信将聊天数据存储在本地的 SQLCipher 加密 SQLite 数据库中。WeChat CLI：
 
-1. **提取密钥** — 扫描微信进程内存获取加密密钥（`init`）
-2. **即时解密** — 透明页级 AES-256-CBC 解密，带缓存
+1. **受控取得密钥** — 默认使用受信 helper 标准输入导入并以真实数据库页校验；内存扫描仅限已验收版本
+2. **即时解密** — 透明页级 AES-256-CBC 解密；解密缓存只存于本次进程的私有目录，正常退出时删除
 3. **本地查询** — 所有数据留在本机，无需网络访问
+
+### 密钥与缓存安全边界
+
+- 初始化结果保存在 `~/.wechat-cli/generations/<id>/`，`active.json` 只在配置与密钥全部读回成功后切换。
+- `doctor`、`init --dry-run` 和默认 `init` 不会读取微信进程内存；未知客户端版本在申请进程内存读取权限前失败关闭。
+- 初始化和扫描日志只显示匹配状态、数据库路径和密钥数量，不回显完整密钥。
+- Windows 使用 CurrentUser DPAPI 并显式收紧 NTFS ACL；macOS 使用登录钥匙串；Linux 使用 Secret Service。若系统密钥库不可用，默认失败关闭。仅可通过 `WECHAT_CLI_ALLOW_PLAINTEXT_KEYS=1` 显式启用兼容明文文件后端。
+- 解密前先复制稳定的 DB/WAL 快照；SQLCipher 页 HMAC、SQLite WAL checksum 与最后提交帧均通过后才应用。明文缓存位于带独占租约的 `cache/run-*`；启动时只清理确认无人持锁的规范遗留目录。
 
 ---
 

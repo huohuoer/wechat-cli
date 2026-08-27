@@ -4,17 +4,15 @@ import hashlib
 import os
 import re
 import sqlite3
-import xml.etree.ElementTree as ET
 from contextlib import closing
 from datetime import datetime
 
 import zstandard as zstd
 
 from .key_utils import key_path_variants
+from .xml_utils import parse_untrusted_xml
 
 _zstd_dctx = zstd.ZstdDecompressor()
-_XML_UNSAFE_RE = re.compile(r'<!DOCTYPE|<!ENTITY', re.IGNORECASE)
-_XML_PARSE_MAX_LEN = 20000
 _QUERY_LIMIT_MAX = 500
 _HISTORY_QUERY_BATCH_SIZE = 500
 
@@ -134,12 +132,7 @@ def _collapse_text(text):
 
 
 def _parse_xml_root(content):
-    if not content or len(content) > _XML_PARSE_MAX_LEN or _XML_UNSAFE_RE.search(content):
-        return None
-    try:
-        return ET.fromstring(content)
-    except ET.ParseError:
-        return None
+    return parse_untrusted_xml(content)
 
 
 def _parse_int(value, fallback=0):
