@@ -17,15 +17,35 @@ SALT_SZ = 16
 
 
 def verify_enc_key(enc_key, db_page1):
-    """通过 HMAC-SHA512 校验 page 1 验证 enc_key 是否正确。"""
+    """通过 HMAC-SHA1 (新版) 或 HMAC-SHA512 (旧版) 校验 page 1 验证 enc_key 是否正确。
+
+    微信 3.9+ 使用 HMAC-SHA1，更早版本使用 HMAC-SHA512。
+    """
     salt = db_page1[:SALT_SZ]
     mac_salt = bytes(b ^ 0x3A for b in salt)
-    mac_key = hashlib.pbkdf2_hmac("sha512", enc_key, mac_salt, 2, dklen=KEY_SZ)
-    hmac_data = db_page1[SALT_SZ: PAGE_SZ - 80 + 16]
-    stored_hmac = db_page1[PAGE_SZ - 64: PAGE_SZ]
-    hm = hmac_mod.new(mac_key, hmac_data, hashlib.sha512)
-    hm.update(struct.pack("<I", 1))
-    return hm.digest() == stored_hmac
+
+    # 尝试 HMAC-SHA1 (新版微信 3.9+, 包括 4.1.x)
+    try:
+        mac_key = hashlib.pbkdf2_hmac("sha1", enc_key, mac_salt, 64000, dklen=KEY_SZ)
+        hmac_data = db_page1[SALT_SZ: PAGE_SZ - 32]
+        stored_hmac = db_page1[PAGE_SZ - 32: PAGE_SZ - 12]
+        hm = hmac_mod.new(mac_key, hmac_data, hashlib.sha1)
+        hm.update(struct.pack("<I", 1))
+        if hm.digest()[:20] == stored_hmac:
+            return True
+    except Exception:
+        pass
+
+    # 回退到 HMAC-SHA512 (旧版微信)
+    try:
+        mac_key = hashlib.pbkdf2_hmac("sha512", enc_key, mac_salt, 2, dklen=KEY_SZ)
+        hmac_data = db_page1[SALT_SZ: PAGE_SZ - 80 + 16]
+        stored_hmac = db_page1[PAGE_SZ - 64: PAGE_SZ]
+        hm = hmac_mod.new(mac_key, hmac_data, hashlib.sha512)
+        hm.update(struct.pack("<I", 1))
+        return hm.digest() == stored_hmac
+    except Exception:
+        return False
 
 
 def collect_db_files(db_dir):
