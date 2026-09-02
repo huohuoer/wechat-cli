@@ -7,7 +7,12 @@ import subprocess
 import sys
 import tempfile
 
-from .common import collect_db_files, cross_verify_keys, save_results, scan_memory_for_keys
+from .common import (
+    collect_db_files,
+    cross_verify_keys,
+    save_results,
+    verify_enc_key,
+)
 
 
 def _find_binary():
@@ -131,6 +136,11 @@ def extract_keys(db_dir, output_path, pid=None):
     """
     import json
 
+    db_files, salt_to_dbs = collect_db_files(db_dir)
+    if not db_files:
+        raise RuntimeError(f"在 {db_dir} 未找到可解密的 .db 文件")
+
+    print(f"[+] 找到 {len(db_files)} 个数据库, {len(salt_to_dbs)} 个不同的 salt")
     binary = _find_binary()
 
     # C 二进制的工作目录需要是 db_storage 的父目录
@@ -193,6 +203,12 @@ def extract_keys(db_dir, output_path, pid=None):
                 "然后重启微信，再执行: sudo wechat-cli init"
             )
 
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"密钥扫描程序退出（状态码 {result.returncode}）"
+            + (f": {result.stderr.strip()}" if result.stderr else "")
+        )
+
     # C 二进制输出 all_keys.json 到 work_dir
     c_output = os.path.join(work_dir, "all_keys.json")
     if not os.path.exists(c_output):
@@ -201,22 +217,57 @@ def extract_keys(db_dir, output_path, pid=None):
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
 
-    # 读取并转存到 output_path
-    with open(c_output, encoding="utf-8") as f:
-        keys_data = json.load(f)
+    # C 扫描器输出的是候选值；在 Python 中用数据库页的 HMAC 再校验一次。
+    # 这样既能支持新版 Config.Cipher，也不会把误匹配写入用户配置。
+    try:
+        with open(c_output, encoding="utf-8") as f:
+            keys_data = json.load(f)
+    finally:
+        # all_keys.json 只是 C 扫描器和当前进程之间的临时通信文件。
+        if os.path.abspath(c_output) != os.path.abspath(output_path):
+            try:
+                os.remove(c_output)
+            except FileNotFoundError:
+                pass
 
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(keys_data, f, indent=2, ensure_ascii=False)
+    if not isinstance(keys_data, dict):
+        raise RuntimeError("密钥扫描程序输出格式无效")
 
-    # 清理 C 二进制的临时输出
-    if os.path.abspath(c_output) != os.path.abspath(output_path):
-        os.remove(c_output)
-
-    # 构建 salt -> key 映射
+    db_by_rel = {item[0]: item for item in db_files}
     key_map = {}
+    candidate_count = 0
+    verified_count = 0
     for rel, info in keys_data.items():
-        if isinstance(info, dict) and "enc_key" in info and "salt" in info:
-            key_map[info["salt"]] = info["enc_key"]
+        if not isinstance(info, dict) or "enc_key" not in info:
+            continue
+        enc_key_hex = info["enc_key"]
+        if not isinstance(enc_key_hex, str):
+            continue
+        try:
+            enc_key = bytes.fromhex(enc_key_hex)
+        except ValueError:
+            continue
+        if len(enc_key) != 32:
+            continue
+
+        candidate_count += 1
+        salt_hex = info.get("salt")
+        if not isinstance(salt_hex, str):
+            db_info = db_by_rel.get(rel)
+            salt_hex = db_info[3] if db_info else None
+        if salt_hex not in salt_to_dbs:
+            continue
+
+        for _db_rel, _path, _size, db_salt, page1 in db_files:
+            if db_salt == salt_hex and verify_enc_key(enc_key, page1):
+                key_map[salt_hex] = enc_key_hex.lower()
+                verified_count += 1
+                break
+
+    print(f"[+] 候选密钥 {candidate_count} 个，HMAC 校验通过 {verified_count} 个")
+
+    # 构建 salt -> key 映射，并交叉验证同一密钥对应的其他数据库。
+    cross_verify_keys(db_files, salt_to_dbs, key_map, print)
 
     print(f"\n[+] 提取到 {len(key_map)} 个密钥，保存到: {output_path}")
-    return key_map
+    return save_results(db_files, salt_to_dbs, key_map, output_path, print)
