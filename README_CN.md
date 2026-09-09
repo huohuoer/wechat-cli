@@ -75,7 +75,7 @@ pip install -e .
 
 ![install-claude-code-1](image/install-claude-code-1.png)
 
-注意：请先确保有 node.js 环境。没雨可以让你的 cc 安装环境。
+注意：请先确保有 node.js 环境。没有的话可以让你的 cc 安装环境。
 
 ## 🚀 快速开始
 
