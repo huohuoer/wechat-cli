@@ -24,23 +24,27 @@ function getBinaryPath() {
   // 2. 从平台包解析
   const pkg = PLATFORM_PACKAGES[platformKey];
   if (!pkg) {
-    console.error(`wechat-cli: unsupported platform ${platformKey}`);
+    console.error(`wechat-cli: 暂不支持平台 ${platformKey}`);
     process.exit(1);
   }
 
   try {
     return require.resolve(`${pkg}/bin/wechat-cli${ext}`);
   } catch {
-    // 3. fallback: 直接找 node_modules 下的路径
-    const modPath = path.join(
-      path.dirname(require.resolve(`${pkg}/package.json`)),
-      `bin/wechat-cli${ext}`
-    );
-    if (fs.existsSync(modPath)) return modPath;
+    // 3. 尝试从平台包目录查找，平台包缺失时也不能泄漏嵌套解析异常。
+    try {
+      const modPath = path.join(
+        path.dirname(require.resolve(`${pkg}/package.json`)),
+        `bin/wechat-cli${ext}`
+      );
+      if (fs.existsSync(modPath)) return modPath;
+    } catch {
+      // 可选平台包可能被 npm 忽略，统一输出下方安装提示。
+    }
   }
 
-  console.error(`wechat-cli: binary not found for ${platformKey}`);
-  console.error('Try: npm install --force @canghe/wechat-cli');
+  console.error(`wechat-cli: 未找到 ${platformKey} 平台包或可执行文件`);
+  console.error('请重新安装: npm install --include=optional @canghe_ai/wechat-cli@0.3.0');
   process.exit(1);
 }
 
@@ -51,5 +55,6 @@ try {
   });
 } catch (e) {
   if (e && e.status != null) process.exit(e.status);
-  throw e;
+  console.error(`wechat-cli: 无法启动可执行文件（${e.code || '未知错误'}），请检查安装路径和执行权限`);
+  process.exit(1);
 }

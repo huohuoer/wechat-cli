@@ -26,7 +26,7 @@ def _choose_candidate(candidates):
         return candidates[0]
     if len(candidates) > 1:
         if not sys.stdin.isatty():
-            return candidates[0]
+            raise ValueError("检测到多个微信账号；请通过 --db-dir 明确指定，不会自动选择")
         print("[!] 检测到多个微信数据目录:")
         for i, c in enumerate(candidates, 1):
             print(f"    {i}. {c}")
