@@ -1,12 +1,11 @@
 """应用上下文 — 单例持有配置、缓存、密钥等共享状态"""
 
 import atexit
-import json
 import os
 
 from .config import load_config, STATE_DIR
 from .db_cache import DBCache
-from .key_utils import strip_key_metadata
+from .key_utils import load_keys
 from .messages import find_msg_db_keys
 
 
@@ -22,11 +21,10 @@ class AppContext:
         if not os.path.exists(self.keys_file):
             raise FileNotFoundError(
                 f"密钥文件不存在: {self.keys_file}\n"
-                "请运行: wechat-cli init"
+                "请运行: wechat-cli init --keys ~/.wx-cli/all_keys.json，或 keys extract --allow-memory-read --save"
             )
 
-        with open(self.keys_file, encoding="utf-8") as f:
-            self.all_keys = strip_key_metadata(json.load(f))
+        self.all_keys = load_keys(self.keys_file)
 
         self.cache = DBCache(self.all_keys, self.db_dir)
         atexit.register(self.cache.cleanup)

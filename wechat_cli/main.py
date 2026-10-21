@@ -6,7 +6,7 @@ import click
 
 from .core.context import AppContext
 
-_VERSION = "0.2.4"
+_VERSION = "0.3.0"
 
 
 @click.group()
@@ -19,7 +19,7 @@ def cli(ctx, config_path):
 
     \b
     使用示例:
-      wechat-cli init                                # 首次使用：提取密钥
+      wechat-cli init --keys ~/.wx-cli/all_keys.json   # 导入已有有效密钥
       wechat-cli sessions                            # 最近会话列表
       wechat-cli sessions --limit 10                 # 最近 10 个会话
       wechat-cli history "张三" --limit 20          # 查看张三的最近 20 条消息
@@ -30,7 +30,7 @@ def cli(ctx, config_path):
       wechat-cli new-messages                       # 获取增量新消息
     """
     # init/version 命令不需要 AppContext
-    if ctx.invoked_subcommand in ("init", "version"):
+    if ctx.invoked_subcommand in ("init", "keys", "version") or ctx.invoked_subcommand is None:
         return
 
     try:
@@ -45,6 +45,7 @@ def cli(ctx, config_path):
 
 # 注册子命令
 from .commands.init import init
+from .commands.keys import keys
 from .commands.sessions import sessions
 from .commands.history import history
 from .commands.search import search
@@ -57,6 +58,7 @@ from .commands.unread import unread
 from .commands.favorites import favorites
 
 cli.add_command(init)
+cli.add_command(keys)
 cli.add_command(sessions)
 cli.add_command(history)
 cli.add_command(search)

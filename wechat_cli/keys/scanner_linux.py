@@ -1,14 +1,15 @@
 """Linux 密钥提取 — 通过 /proc 读取微信进程内存"""
 
-import functools
 import os
 import re
-import sys
 import time
 
 from .common import collect_db_files, scan_memory_for_keys, cross_verify_keys, save_results
 
-print = functools.partial(print, flush=True)
+from .cipher_config import iter_memory_chunks, quiet_log
+from .capture_linux import capture_passphrase, derive_keys_from_passphrase
+
+print = quiet_log
 
 
 def _safe_readlink(path):
@@ -99,40 +100,28 @@ def _get_readable_regions(pid):
     return regions
 
 
-def _check_permissions():
-    """检查是否有读取进程内存的权限。"""
-    if os.geteuid() == 0:
-        return
-    try:
-        with open("/proc/self/status") as f:
-            for line in f:
-                if line.startswith("CapEff:"):
-                    cap_eff = int(line.split(":")[1].strip(), 16)
-                    CAP_SYS_PTRACE = 1 << 19
-                    if cap_eff & CAP_SYS_PTRACE:
-                        return
-                    break
-    except (OSError, ValueError):
-        pass
-    raise RuntimeError(
-        "需要 root 权限或 CAP_SYS_PTRACE 才能读取进程内存\n"
-        "请使用: sudo wechat-cli init\n"
-        "或授予 capability: sudo setcap cap_sys_ptrace=ep $(which python3)"
-    )
+def _check_permissions(pid):
+    """以实际打开结果判断权限，同用户且内核允许时无需额外 capability。"""
+    return open(f"/proc/{pid}/mem", "rb")
 
 
-def extract_keys(db_dir, output_path, pid=None):
+def extract_keys(db_dir, output_path=None, pid=None, *, method="memory", timeout=120):
     """提取 Linux 微信数据库密钥。
 
     Args:
         db_dir: 微信数据库目录
-        output_path: all_keys.json 输出路径
+        output_path: 输出路径；None 由共享保存层返回 key_map，不写文件
         pid: 可选，指定 PID（默认自动检测）
+        method: memory 保留传统扫描；gdb 显式附加并等待密码配置调用
+        timeout: gdb 等待超时秒数；不会自动登录、启动微信或更改权限
 
     Returns:
         dict: salt_hex -> enc_key_hex 映射
     """
-    _check_permissions()
+    if method not in ("memory", "gdb"):
+        raise ValueError("method 仅支持 memory 或 gdb")
+    if pid is not None and (not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0):
+        raise ValueError("pid 必须为正整数")
 
     print("=" * 60)
     print("  提取 Linux 微信数据库密钥（内存扫描）")
@@ -147,17 +136,27 @@ def extract_keys(db_dir, output_path, pid=None):
         print(f"  salt {salt_hex}: {', '.join(dbs)}")
 
     pids = _get_pids() if pid is None else [(pid, 0)]
+    if method == "gdb":
+        pid_value = pids[0][0]
+        if not _is_wechat_process(pid_value):
+            raise RuntimeError("指定 PID 不是微信进程")
+        passphrase = capture_passphrase(pid_value, timeout=timeout)
+        key_map = derive_keys_from_passphrase(passphrase, db_files, salt_to_dbs)
+        return save_results(db_files, salt_to_dbs, key_map, output_path, print)
 
     hex_re = re.compile(rb"x'([0-9a-fA-F]{64,192})'")
     key_map = {}
     remaining_salts = set(salt_to_dbs.keys())
     all_hex_matches = 0
+    readable_processes = 0
+    permission_denied = False
     t0 = time.time()
 
     for pid_val, rss_kb in pids:
         try:
             regions = _get_readable_regions(pid_val)
         except PermissionError:
+            permission_denied = True
             print(f"[WARN] 无法读取 /proc/{pid_val}/maps，权限不足，跳过")
             continue
         except (FileNotFoundError, ProcessLookupError):
@@ -170,8 +169,9 @@ def extract_keys(db_dir, output_path, pid=None):
 
         scanned_bytes = 0
         try:
-            mem = open(f"/proc/{pid_val}/mem", "rb")
+            mem = _check_permissions(pid_val)
         except PermissionError:
+            permission_denied = True
             print(f"[WARN] 无法打开 /proc/{pid_val}/mem，权限不足，跳过")
             continue
         except (FileNotFoundError, ProcessLookupError):
@@ -184,12 +184,15 @@ def extract_keys(db_dir, output_path, pid=None):
             continue
 
         try:
-            for reg_idx, (base, size) in enumerate(regions):
+            def read(address, size):
                 try:
-                    mem.seek(base)
-                    data = mem.read(size)
+                    mem.seek(address)
+                    return mem.read(size)
                 except (OSError, ValueError):
-                    continue
+                    return None
+
+            for reg_idx, (base, data) in enumerate(iter_memory_chunks(read, regions)):
+                readable_processes += 1
                 scanned_bytes += len(data)
 
                 all_hex_matches += scan_memory_for_keys(
@@ -211,6 +214,8 @@ def extract_keys(db_dir, output_path, pid=None):
             print(f"\n[+] 所有密钥已找到，跳过剩余进程")
             break
 
+    if not readable_processes and permission_denied:
+        raise RuntimeError("当前权限无法读取目标内存；请检查同用户读取权限及 Yama 策略，未更改系统权限")
     elapsed = time.time() - t0
     print(f"\n扫描完成: {elapsed:.1f}s, {len(pids)} 个进程, {all_hex_matches} hex 模式")
 
